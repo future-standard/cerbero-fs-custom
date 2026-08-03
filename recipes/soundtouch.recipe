@@ -9,7 +9,19 @@ class Recipe(recipe.Recipe):
     stype = SourceType.TARBALL
     url = 'https://codeberg.org/soundtouch/soundtouch/archive/%(version)s.tar.gz'
     tarball_dirname = 'soundtouch'
-    tarball_checksum = 'e07abf20ce8f95850c280132e1f61ad400fc1f4011b7fac698a503de6aab6733'
+    # --- BEGIN futurestandard custom packaging ---
+    # Codeberg's /archive/<tag>.tar.gz endpoint regenerates the tarball
+    # dynamically (rather than serving a static, permanently-cached
+    # blob), so its byte-for-byte checksum can change over time even
+    # though the actual source content for a given tag does not. The
+    # checksum recorded by upstream Cerbero for this recipe became stale
+    # and started failing verification during a real build; verified
+    # by re-downloading the tarball fresh and confirming its contents
+    # are still exactly soundtouch 2.4.1 (CMakeLists.txt: "project(SoundTouch
+    # VERSION 2.4.1 ...)"), just repackaged with a different checksum.
+    # Updated to the checksum actually being served as of 2026-08-03.
+    tarball_checksum = '35d404e6e8c2ebd12fb4000da6fadd75c99e37eed2126a04721828c11c0377ec'
+    # --- END futurestandard custom packaging ---
 
     patches = [
         # https://wrapdb.mesonbuild.com/v2/soundtouch_2.4.1-1/get_patch
