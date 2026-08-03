@@ -1,0 +1,13 @@
+diff --git a/gst/videoparsers/gsth264parse.c b/gst/videoparsers/gsth264parse.c
+index e08e3f00f5..f2e266a7bd 100644
+--- a/_p2_/gst/videoparsers/gsth264parse.c
++++ b/_p2_/gst/videoparsers/gsth264parse.c
+@@ -197,7 +197,7 @@ static void
+ gst_h264_parse_init (GstH264Parse * h264parse)
+ {
+   h264parse->frame_out = gst_adapter_new ();
+-  gst_base_parse_set_pts_interpolation (GST_BASE_PARSE (h264parse), FALSE);
++  gst_base_parse_set_pts_interpolation (GST_BASE_PARSE (h264parse), TRUE);
+   gst_base_parse_set_infer_ts (GST_BASE_PARSE (h264parse), FALSE);
+   GST_PAD_SET_ACCEPT_INTERSECT (GST_BASE_PARSE_SINK_PAD (h264parse));
+   GST_PAD_SET_ACCEPT_TEMPLATE (GST_BASE_PARSE_SINK_PAD (h264parse));

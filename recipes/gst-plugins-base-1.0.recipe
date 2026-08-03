@@ -5,6 +5,20 @@ class Recipe(custom.GStreamer):
     name = 'gst-plugins-base-1.0'
     btype = BuildType.MESON
     tarball_checksum = '776f19228f91fd25bbf54d9850597e158507f594872a52b9b6814e2429b43eaa'
+
+    # --- BEGIN futurestandard custom patches ---
+    # strip = 2 because these patches were written/reviewed as plain -p1
+    # diffs (rooted at this recipe's own source tree) and carry an extra
+    # leading '_p2_' path component so that 'patch -p2' lands on the same
+    # file. See cerbero/build/source.py's Tarball.extract_impl(), which
+    # calls shell.apply_patch(patch, self.src_dir, self.strip, ...) i.e.
+    # 'patch -p<strip> -f -i <patch>' for every entry in 'patches' on
+    # every (re-)extract of this recipe's tarball.
+    strip = 2
+    patches = [
+        'gst-plugins-base-1.0/0001-clockoverlay-add-buffer-time-mode.patch',
+    ]
+    # --- END futurestandard custom patches ---
     meson_options = {# enabled plugins
                      'gl': 'enabled',
                      'gl-graphene': 'enabled',

@@ -1,0 +1,188 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH v2] h264decoder: recover from an unpairable field instead of wedging
+
+gst_h264_decoder_find_first_field_picture() rejects the incoming slice when the
+previously decoded field cannot be paired with it, which happens when
+
+  a) a frame picture arrives while a first field is still pending,
+  b) the pending first field belongs to a different frame_num, or
+  c) the pending first field has the same parity as the incoming field.
+
+In all three cases the pending field can never be completed, so it has to be
+dropped. Upstream only does that for a field still held in priv->last_field.
+When the orphaned field has already been placed in the DPB, the code merely
+leaves a
+
+    /* FIXME: implement fill gap field picture if it is already in DPB */
+
+comment and does nothing, then returns FALSE so that
+gst_h264_decoder_parse_slice() fails the slice with GST_FLOW_ERROR.
+
+That combination is unrecoverable. find_first_field_picture() always looks at
+the *last* entry of the DPB, so the orphan it just refused to pair is exactly
+what the next slice finds as well. Every following slice therefore takes the
+same error path and the decoder never outputs another frame; it only logs
+
+    Couldn't find or determine first picture
+    error: Failed to decode data
+
+for each incoming slice until the pipeline is torn down. GstVideoDecoder's
+"max-errors" property defaults to -1 (unlimited), so _gst_video_decoder_error()
+never posts GST_MESSAGE_ERROR either and the application is not even told that
+anything went wrong - the video just freezes with the last (partially decoded,
+visibly corrupted) picture on screen.
+
+This is trivially reachable with live interlaced (PAFF) broadcast streams over
+RTP/UDP, where losing a single packet can drop one field of a pair. Observed on
+an Intel N150 iGPU with vah264dec decoding a 1920x1080i H.264 stream received
+over RTP/MPEG-2 TS multicast: after a single-packet loss the decoder emitted the
+above error for every subsequent slice and never recovered.
+
+Fix it by discarding the orphaned field in both cases - clearing
+priv->last_field as before, or evicting the picture from the DPB by resetting
+its output/reference flags and letting gst_h264_dpb_delete_unused() reap it -
+and then returning TRUE with *first_field = NULL. The caller then simply starts
+a new picture from the current slice, so decoding resumes with at most the
+picture whose field was lost being damaged.
+
+v2: also release the picture's GstVideoCodecFrame.
+
+The videodecoder base class keeps every submitted frame on its internal list
+until it is either finished or released, and for va* subclasses that frame's
+output_buffer is what actually owns the decoded VA surface (exported as a
+dmabuf). v1 only dropped the GstH264Picture, so each recovery leaked one
+frame - and with it one surface/dmabuf fd. A one-hour soak against a stream
+that hits the unpairable-field condition every ~11 minutes showed the process
+fd count and GPU memory growing 1:1 with the recoveries (47 recoveries ->
++49 fds, +172 MiB GPU memory), while a stream without such events stayed
+perfectly flat. Mirror what gst_h264_decoder_clear_dpb() does when discarding
+without output: look the frame up by the picture's system_frame_number and
+gst_video_decoder_release_frame() it before dropping the picture itself.
+
+Note that an orphaned field may still be marked as a reference. Dropping a
+reference can make subsequent pictures that refer to it decode with artefacts,
+but a half-decoded field is unusable as a reference anyway, and the only
+alternative is a decoder that is stuck forever.
+--- a/_p2_/gst-libs/gst/codecs/gsth264decoder.c
++++ b/_p2_/gst-libs/gst/codecs/gsth264decoder.c
+@@ -1165,6 +1165,91 @@
+   return new_picture;
+ }
+ 
++/* Local fix: discard an unpaired ("orphaned") field picture so that decoding
++ * can recover.
++ *
++ * gst_h264_decoder_find_first_field_picture() detects three situations in
++ * which the previously decoded field cannot be paired with the field that is
++ * about to be decoded:
++ *
++ *   a) a frame picture arrives while a first field is still pending,
++ *   b) the pending first field belongs to a different frame_num,
++ *   c) the pending first field has the same parity as the incoming field.
++ *
++ * All three mean the pending field can never be completed and must be thrown
++ * away. Upstream only handles the case where that field is still held in
++ * priv->last_field; when the field already sits in the DPB the original code
++ * merely leaves a "FIXME: implement fill gap field picture if it is already in
++ * DPB" comment and does nothing at all, so the orphan stays in the DPB
++ * forever. Because gst_h264_decoder_find_first_field_picture() always inspects
++ * the *last* DPB entry, every subsequent slice keeps finding the very same
++ * orphan, fails again, and the decoder never produces another frame: it just
++ * emits "Couldn't find or determine first picture" for every incoming slice
++ * until the pipeline is torn down.
++ *
++ * This is easy to hit in the field with live interlaced (PAFF) broadcast
++ * streams over RTP/UDP: a single lost packet can drop one field of a pair,
++ * and from that moment on the decoder is wedged. Since GstVideoDecoder's
++ * "max-errors" property defaults to -1 (tolerate an unlimited number of
++ * errors), no GST_MESSAGE_ERROR is ever posted either, so the application
++ * cannot even detect the condition - the video simply freezes.
++ *
++ * Evict the orphan from the DPB (by clearing its output/reference flags and
++ * letting gst_h264_dpb_delete_unused() reap it) so that the next picture can
++ * be decoded normally.
++ *
++ * NOTE: an orphaned field may still be marked as a reference picture. Dropping
++ * a reference can make later pictures that refer to it decode with artefacts,
++ * but such a half-decoded field is unusable as a reference anyway and the only
++ * alternative is a permanently stuck decoder, so discarding it is strictly
++ * better.
++ *
++ * @prev_field must not be dereferenced by the caller after this call: it may
++ * have been freed when it was removed from the DPB.
++ */
++static void
++gst_h264_decoder_drop_unpaired_field (GstH264Decoder * self,
++    GstH264Picture * prev_field, gboolean in_dpb)
++{
++  GstH264DecoderPrivate *priv = self->priv;
++  GstVideoCodecFrame *frame;
++
++  GST_DEBUG_OBJECT (self,
++      "Discarding unpaired field picture %p (frame_num %d, poc %d, field %d, "
++      "in_dpb %d) so that decoding can resume", prev_field,
++      prev_field->frame_num, prev_field->pic_order_cnt, prev_field->field,
++      in_dpb);
++
++  /* Also drop the GstVideoCodecFrame the videodecoder base class still
++   * tracks for this picture. This mirrors what gst_h264_decoder_clear_dpb()
++   * does when it empties the DPB without outputting: unreffing only the
++   * GstH264Picture is not enough, because the frame's output_buffer is what
++   * actually owns the decoder surface (for va* subclasses a VA surface
++   * exported as a dmabuf). While the frame stays on the base class's list
++   * that buffer can never return to the pool, so every recovery would
++   * otherwise leak one surface/dmabuf fd - observed as fd counts growing
++   * 1:1 with these recoveries during long-run testing. */
++  frame = gst_video_decoder_get_frame (GST_VIDEO_DECODER (self),
++      GST_CODEC_PICTURE_FRAME_NUMBER (prev_field));
++  if (frame)
++    gst_video_decoder_release_frame (GST_VIDEO_DECODER (self), frame);
++
++  if (!in_dpb) {
++    /* Not in the DPB yet, still owned by priv->last_field. */
++    gst_clear_h264_picture (&priv->last_field);
++    return;
++  }
++
++  /* gst_h264_dpb_delete_unused() only reaps pictures that are neither needed
++   * for output nor used for reference. */
++  prev_field->needed_for_output = FALSE;
++  prev_field->ref = GST_H264_PICTURE_REF_NONE;
++  prev_field->ref_pic = FALSE;
++
++  gst_h264_dpb_delete_unused (priv->dpb);
++  /* prev_field may be freed at this point. */
++}
++
+ static gboolean
+ gst_h264_decoder_find_first_field_picture (GstH264Decoder * self,
+     GstH264Slice * slice, GstH264Picture ** first_field)
+@@ -1235,13 +1320,22 @@
+   return TRUE;
+ 
+ error:
+-  if (!in_dpb) {
+-    gst_clear_h264_picture (&priv->last_field);
+-  } else {
+-    /* FIXME: implement fill gap field picture if it is already in DPB */
+-  }
++  /* Local fix: the pending field can never be completed. Throw it away
++   * (including when it already lives in the DPB, which upstream does not
++   * handle - see gst_h264_decoder_drop_unpaired_field() for the full
++   * rationale) and report success with no first field, so that the caller
++   * starts a brand new picture from the current slice instead of failing.
++   *
++   * Returning FALSE here (the upstream behaviour) makes
++   * gst_h264_decoder_parse_slice() return GST_FLOW_ERROR for this slice, and
++   * because the orphan used to be left in the DPB the very next slice hit the
++   * exact same failure, wedging the decoder permanently. Recovering in place
++   * keeps the decoder running and costs at most the picture whose field was
++   * lost. */
++  gst_h264_decoder_drop_unpaired_field (self, prev_field, in_dpb);
+ 
+-  return FALSE;
++  *first_field = NULL;
++  return TRUE;
+ }
+ 
+ static GstFlowReturn

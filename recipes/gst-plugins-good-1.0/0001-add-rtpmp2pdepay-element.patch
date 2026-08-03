@@ -1,0 +1,37 @@
+diff --git a/gst/rtp/gstrtp.c b/gst/rtp/gstrtp.c
+index 9528ffb10c..8aecb89a05 100644
+--- a/_p2_/gst/rtp/gstrtp.c
++++ b/_p2_/gst/rtp/gstrtp.c
+@@ -91,6 +91,7 @@ plugin_init (GstPlugin * plugin)
+   ret |= GST_ELEMENT_REGISTER (rtpldacpay, plugin);
+   ret |= GST_ELEMENT_REGISTER (asteriskh263, plugin);
+   ret |= GST_ELEMENT_REGISTER (rtpmp1sdepay, plugin);
++  ret |= GST_ELEMENT_REGISTER (rtpmp2pdepay, plugin);
+   ret |= GST_ELEMENT_REGISTER (rtpmp2tdepay, plugin);
+   ret |= GST_ELEMENT_REGISTER (rtpmp2tpay, plugin);
+   ret |= GST_ELEMENT_REGISTER (rtpmp4vpay, plugin);
+diff --git a/gst/rtp/gstrtpelements.h b/gst/rtp/gstrtpelements.h
+index 9321d3530a..295bda9ecc 100644
+--- a/_p2_/gst/rtp/gstrtpelements.h
++++ b/_p2_/gst/rtp/gstrtpelements.h
+@@ -91,6 +91,7 @@ GST_ELEMENT_REGISTER_DECLARE (rtpL24depay);
+ GST_ELEMENT_REGISTER_DECLARE (rtpldacpay);
+ GST_ELEMENT_REGISTER_DECLARE (asteriskh263);
+ GST_ELEMENT_REGISTER_DECLARE (rtpmp1sdepay);
++GST_ELEMENT_REGISTER_DECLARE (rtpmp2pdepay);
+ GST_ELEMENT_REGISTER_DECLARE (rtpmp2tdepay);
+ GST_ELEMENT_REGISTER_DECLARE (rtpmp2tpay);
+ GST_ELEMENT_REGISTER_DECLARE (rtpmp4vpay);
+diff --git a/gst/rtp/meson.build b/gst/rtp/meson.build
+index aa76523ec3..701bbab744 100644
+--- a/_p2_/gst/rtp/meson.build
++++ b/_p2_/gst/rtp/meson.build
+@@ -66,6 +66,7 @@ rtp_sources = [
+   'gstrtpldacpay.c',
+   'gstasteriskh263.c',
+   'gstrtpmp1sdepay.c',
++  'gstrtpmp2pdepay.c',
+   'gstrtpmp2tdepay.c',
+   'gstrtpmp2tpay.c',
+   'gstrtpmp4vdepay.c',
+

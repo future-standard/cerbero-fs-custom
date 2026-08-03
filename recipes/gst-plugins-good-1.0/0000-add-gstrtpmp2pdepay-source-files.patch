@@ -1,0 +1,307 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH] rtp: add new gstrtpmp2pdepay.c/.h source files
+
+Adds the new rtpmp2pdepay element implementation as brand new source
+files (gst/rtp/gstrtpmp2pdepay.c/.h). This statefully auto-detects the
+presence of a non-standard 4-byte header some encoders incorrectly
+prepend to every RTP payload, by detecting the MPEG start code
+(00 00 01), and resets on stream switches in change_state().
+
+Must be applied together with
+0001-add-rtpmp2pdepay-element.patch, which wires the element into
+gstrtp.c/gstrtpelements.h/meson.build.
+
+diff --git a/gst/rtp/gstrtpmp2pdepay.c b/gst/rtp/gstrtpmp2pdepay.c
+new file mode 100644
+index 0000000..28d6124
+--- /dev/null
++++ b/_p2_/gst/rtp/gstrtpmp2pdepay.c
+@@ -0,0 +1,234 @@
++/* RTP depayloader for MPEG2 PS Streams.
++ *
++ * Some encoders incorrectly prepend a fixed 4-byte non-standard header
++ * to EVERY RTP payload even for Program Stream data.  This depayloader
++ * detects and strips that header.
++ *
++ * Known header values observed in the field:
++ *   45 AE 80 90  (弁天橋 camera)
++ *   F0 00 00 00  (嶺田 camera)
++ *
++ * The MPEG-2 PS data is often split across multiple RTP packets.  Only
++ * the first packet of each pack starts with the 3-byte start code
++ * prefix 00 00 01; continuation packets contain raw stream data that
++ * does not start with 00 00 01.  However, the non-standard 4-byte
++ * header is prepended to ALL packets – not just the ones that begin a
++ * new pack.
++ *
++ * Therefore the detection is *stateful*:
++ *   1. On each packet we check whether the payload does NOT start with
++ *      00 00 01 but bytes [4..6] ARE 00 00 01.  If so, we know the
++ *      encoder is prepending a 4-byte header and we latch the
++ *      "strip_header" flag.
++ *   2. Once the flag is latched, we unconditionally strip the first
++ *      4 bytes from every subsequent packet as well, even if they do
++ *      not contain 00 00 01 at offset 4 (continuation packets).
++ *
++ * The flag is reset on a state change so that a new stream is handled
++ * from scratch.
++ *
++ * SPDX-License-Identifier: LGPL-2.0-or-later
++ */
++
++#ifdef HAVE_CONFIG_H
++#  include "config.h"
++#endif
++
++#include <gst/rtp/gstrtpbuffer.h>
++
++#include <string.h>
++#include "gstrtpelements.h"
++#include "gstrtpmp2pdepay.h"
++#include "gstrtputils.h"
++
++/* Size of the non-standard header that some encoders prepend. */
++#define MPV_HEADER_SIZE 4
++
++/* MPEG-2 PS / MPEG-1 SS start code prefix (ISO 13818-1 §2.4.3.3) */
++static const guint8 MPEG_START_CODE_PREFIX[3] = { 0x00, 0x00, 0x01 };
++
++static GstStaticPadTemplate gst_rtp_mp2p_depay_src_template =
++GST_STATIC_PAD_TEMPLATE ("src",
++    GST_PAD_SRC,
++    GST_PAD_ALWAYS,
++    GST_STATIC_CAPS ("video/mpeg, "
++        "mpegversion = (int) { 1, 2 }, "
++        "systemstream = (boolean) TRUE")
++    );
++
++static GstStaticPadTemplate gst_rtp_mp2p_depay_sink_template =
++    GST_STATIC_PAD_TEMPLATE ("sink",
++    GST_PAD_SINK,
++    GST_PAD_ALWAYS,
++    GST_STATIC_CAPS ("application/x-rtp, "
++        "media = (string) \"video\", "
++        "clock-rate = (int) [1, MAX ], " "encoding-name = (string) \"MP2P\"")
++    );
++
++G_DEFINE_TYPE (GstRtpMP2PDepay, gst_rtp_mp2p_depay,
++    GST_TYPE_RTP_BASE_DEPAYLOAD);
++GST_ELEMENT_REGISTER_DEFINE_WITH_CODE (rtpmp2pdepay, "rtpmp2pdepay",
++    GST_RANK_SECONDARY, GST_TYPE_RTP_MP2P_DEPAY, rtp_element_init (plugin));
++
++static gboolean gst_rtp_mp2p_depay_setcaps (GstRTPBaseDepayload * depayload,
++    GstCaps * caps);
++static GstBuffer *gst_rtp_mp2p_depay_process (GstRTPBaseDepayload * depayload,
++    GstRTPBuffer * rtp);
++static GstStateChangeReturn gst_rtp_mp2p_depay_change_state (
++    GstElement * element, GstStateChange transition);
++
++static void
++gst_rtp_mp2p_depay_class_init (GstRtpMP2PDepayClass * klass)
++{
++  GstElementClass *gstelement_class;
++  GstRTPBaseDepayloadClass *gstrtpbasedepayload_class;
++
++  gstelement_class = (GstElementClass *) klass;
++  gstrtpbasedepayload_class = (GstRTPBaseDepayloadClass *) klass;
++
++  gstelement_class->change_state = gst_rtp_mp2p_depay_change_state;
++
++  gstrtpbasedepayload_class->process_rtp_packet = gst_rtp_mp2p_depay_process;
++  gstrtpbasedepayload_class->set_caps = gst_rtp_mp2p_depay_setcaps;
++
++  gst_element_class_add_static_pad_template (gstelement_class,
++      &gst_rtp_mp2p_depay_src_template);
++  gst_element_class_add_static_pad_template (gstelement_class,
++      &gst_rtp_mp2p_depay_sink_template);
++
++  gst_element_class_set_static_metadata (gstelement_class,
++      "RTP MPEG2 Program Stream depayloader", "Codec/Depayloader/Network/RTP",
++      "Extracts MPEG2 Program Streams from RTP packets (RFC 2250)",
++      "SCORER");
++}
++
++static void
++gst_rtp_mp2p_depay_init (GstRtpMP2PDepay * rtpmp2pdepay)
++{
++  rtpmp2pdepay->strip_header = FALSE;
++}
++
++static gboolean
++gst_rtp_mp2p_depay_setcaps (GstRTPBaseDepayload * depayload, GstCaps * caps)
++{
++  GstCaps *srccaps;
++  GstStructure *structure;
++  gint clock_rate;
++  gboolean res;
++
++  structure = gst_caps_get_structure (caps, 0);
++  if (!gst_structure_get_int (structure, "clock-rate", &clock_rate))
++    clock_rate = 90000;         /* default */
++  depayload->clock_rate = clock_rate;
++
++  srccaps = gst_caps_new_simple ("video/mpeg",
++      "mpegversion", G_TYPE_INT, 2,
++      "systemstream", G_TYPE_BOOLEAN, TRUE, NULL);
++  res = gst_pad_set_caps (GST_RTP_BASE_DEPAYLOAD_SRCPAD (depayload), srccaps);
++  gst_caps_unref (srccaps);
++
++  return res;
++}
++
++static GstBuffer *
++gst_rtp_mp2p_depay_process (GstRTPBaseDepayload * depayload, GstRTPBuffer * rtp)
++{
++  GstRtpMP2PDepay *rtpmp2pdepay = GST_RTP_MP2P_DEPAY (depayload);
++  GstBuffer *outbuf;
++  guint payload_len;
++  guint8 *payload;
++  guint skip = 0;
++
++  /* RFC 2250 Section 2: Encapsulation of MPEG System and Transport Streams
++   *
++   * For MPEG2 Program Streams and MPEG1 System Streams there are no
++   * packetization restrictions; these streams are treated as a packetized
++   * stream of bytes.
++   *
++   * However, some encoders incorrectly prepend a 4-byte non-standard header
++   * to EVERY packet (e.g. 45 AE 80 90, F0 00 00 00, …).
++   *
++   * Because the PS data is split across multiple RTP packets, only the
++   * first packet of each pack starts with 00 00 01 at offset 4.
++   * Continuation packets have the 4-byte header followed by raw stream
++   * data.  Therefore we use *stateful* detection:
++   *
++   * (a) If we see payload[0..2] != 00 00 01 AND payload[4..6] == 00 00 01,
++   *     we latch strip_header = TRUE and strip 4 bytes.
++   * (b) Once strip_header is latched, we strip 4 bytes from ALL packets
++   *     unconditionally (including continuation packets).
++   */
++
++  payload_len = gst_rtp_buffer_get_payload_len (rtp);
++  if (payload_len <= MPV_HEADER_SIZE)
++    return NULL;
++
++  payload = gst_rtp_buffer_get_payload (rtp);
++
++  if (!rtpmp2pdepay->strip_header) {
++    /* Detection phase: check if we should start stripping.
++     * Condition: payload does NOT begin with MPEG start code prefix,
++     *            but offset 4 DOES begin with MPEG start code prefix. */
++    if (payload_len >= MPV_HEADER_SIZE + 3 &&
++        memcmp (payload,                   MPEG_START_CODE_PREFIX, 3) != 0 &&
++        memcmp (payload + MPV_HEADER_SIZE, MPEG_START_CODE_PREFIX, 3) == 0) {
++      rtpmp2pdepay->strip_header = TRUE;
++      GST_INFO_OBJECT (depayload,
++          "Detected non-standard %u-byte MPV header "
++          "(%02X %02X %02X %02X); will strip from all packets",
++          MPV_HEADER_SIZE,
++          payload[0], payload[1], payload[2], payload[3]);
++    }
++  }
++
++  if (rtpmp2pdepay->strip_header) {
++    skip = MPV_HEADER_SIZE;
++    GST_LOG_OBJECT (depayload,
++        "Stripping %u-byte non-standard MPV header "
++        "(%02X %02X %02X %02X) from payload of %u bytes",
++        skip,
++        payload[0], payload[1], payload[2], payload[3],
++        payload_len);
++  }
++
++  if (skip > 0 && payload_len > skip) {
++    outbuf = gst_rtp_buffer_get_payload_subbuffer (rtp, skip, -1);
++  } else {
++    outbuf = gst_rtp_buffer_get_payload_buffer (rtp);
++  }
++
++  if (outbuf) {
++    GST_DEBUG_OBJECT (depayload,
++        "gst_rtp_mp2p_depay_process: pushing buffer of size %"
++        G_GSIZE_FORMAT " (skipped %u bytes)", gst_buffer_get_size (outbuf),
++        skip);
++
++    gst_rtp_drop_meta (GST_ELEMENT_CAST (depayload), outbuf, 0);
++  }
++
++  return outbuf;
++}
++
++static GstStateChangeReturn
++gst_rtp_mp2p_depay_change_state (GstElement * element,
++    GstStateChange transition)
++{
++  GstRtpMP2PDepay *rtpmp2pdepay = GST_RTP_MP2P_DEPAY (element);
++  GstStateChangeReturn ret;
++
++  switch (transition) {
++    case GST_STATE_CHANGE_PAUSED_TO_READY:
++      /* Reset detection state so that a new stream is analysed fresh. */
++      rtpmp2pdepay->strip_header = FALSE;
++      GST_DEBUG_OBJECT (element, "Reset strip_header state");
++      break;
++    default:
++      break;
++  }
++
++  ret =
++      GST_ELEMENT_CLASS (gst_rtp_mp2p_depay_parent_class)->change_state
++      (element, transition);
++
++  return ret;
++}
+diff --git a/gst/rtp/gstrtpmp2pdepay.h b/gst/rtp/gstrtpmp2pdepay.h
+new file mode 100644
+index 0000000..a81cbdd
+--- /dev/null
++++ b/_p2_/gst/rtp/gstrtpmp2pdepay.h
+@@ -0,0 +1,48 @@
++/* RTP depayloader for MPEG2 PS Streams.
++ *
++ * SPDX-License-Identifier: LGPL-2.0-or-later
++ */
++
++#ifndef __GST_RTP_MP2P_DEPAY_H__
++#define __GST_RTP_MP2P_DEPAY_H__
++
++#include <gst/gst.h>
++#include <gst/rtp/gstrtpbasedepayload.h>
++
++G_BEGIN_DECLS
++
++#define GST_TYPE_RTP_MP2P_DEPAY \
++  (gst_rtp_mp2p_depay_get_type())
++#define GST_RTP_MP2P_DEPAY(obj) \
++  (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_RTP_MP2P_DEPAY,GstRtpMP2PDepay))
++#define GST_RTP_MP2P_DEPAY_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_RTP_MP2P_DEPAY,GstRtpMP2PDepayClass))
++#define GST_IS_RTP_MP2P_DEPAY(obj) \
++  (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_RTP_MP2P_DEPAY))
++#define GST_IS_RTP_MP2P_DEPAY_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_RTP_MP2P_DEPAY))
++
++typedef struct _GstRtpMP2PDepay GstRtpMP2PDepay;
++typedef struct _GstRtpMP2PDepayClass GstRtpMP2PDepayClass;
++
++struct _GstRtpMP2PDepay
++{
++  GstRTPBaseDepayload depayload;
++
++  /* TRUE once we have detected that the encoder prepends a non-standard
++   * 4-byte header to every RTP payload.  Once set, we strip the first
++   * 4 bytes from ALL subsequent packets (not only those that happen to
++   * contain an MPEG start code at offset 4). */
++  gboolean   strip_header;
++};
++
++struct _GstRtpMP2PDepayClass
++{
++  GstRTPBaseDepayloadClass parent_class;
++};
++
++GType gst_rtp_mp2p_depay_get_type (void);
++
++G_END_DECLS
++
++#endif /* __GST_RTP_MP2P_DEPAY_H__ */

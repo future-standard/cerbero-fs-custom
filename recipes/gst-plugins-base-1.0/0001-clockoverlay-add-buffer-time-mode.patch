@@ -1,0 +1,197 @@
+diff --git a/ext/pango/gstclockoverlay.c b/ext/pango/gstclockoverlay.c
+index 88ddfd53d2..bfbd2f22f2 100644
+--- a/_p2_/ext/pango/gstclockoverlay.c
++++ b/_p2_/ext/pango/gstclockoverlay.c
+@@ -57,9 +57,12 @@
+ 
+ #define DEFAULT_PROP_TIMEFORMAT 	"%H:%M:%S"
+ 
++#define DEFAULT_TIME_MODE GST_CLOCK_OVERLAY_TIME_MODE_DEFAULT
++
+ enum
+ {
+   PROP_0,
++  PROP_TIME_MODE,
+   PROP_TIMEFORMAT,
+   PROP_LAST
+ };
+@@ -75,8 +78,26 @@ static void gst_clock_overlay_set_property (GObject * object, guint prop_id,
+ static void gst_clock_overlay_get_property (GObject * object, guint prop_id,
+     GValue * value, GParamSpec * pspec);
+ 
++#define GST_TYPE_CLOCK_OVERLAY_TIME_MODE (gst_clock_overlay_time_mode_type())
++static GType
++gst_clock_overlay_time_mode_type (void)
++{
++  static GType time_mode_type = 0;
++  static const GEnumValue modes[] = {
++    {GST_CLOCK_OVERLAY_TIME_MODE_DEFAULT, "default", "default"},
++    {GST_CLOCK_OVERLAY_TIME_MODE_BUFFER_TIME, "buffer-time", "buffer-time"},
++    {0, NULL, NULL},
++  };
++
++  if (!time_mode_type) {
++    time_mode_type = g_enum_register_static ("GstClockOverlayTimeMode", modes);
++  }
++  return time_mode_type;
++}
++
+ static gchar *
+-gst_clock_overlay_render_time (GstClockOverlay * overlay)
++gst_clock_overlay_render_time (GstClockOverlay * overlay, GstBuffer * video_frame)
++
+ {
+ #ifdef HAVE_LOCALTIME_R
+   struct tm dummy;
+@@ -87,6 +108,7 @@ gst_clock_overlay_render_time (GstClockOverlay * overlay)
+   gunichar2 buf[256];
+ #else
+   gchar buf[256];
++  GstClock *clock;
+ #endif
+ 
+   now = time (NULL);
+@@ -110,9 +132,64 @@ gst_clock_overlay_render_time (GstClockOverlay * overlay)
+ 
+   return g_utf16_to_utf8 (buf, -1, NULL, NULL, NULL);
+ #else
+-  if (strftime (buf, sizeof (buf), overlay->format, t) == 0)
+-    return g_strdup ("");
++  if (strftime(buf, sizeof(buf), overlay->format, t) == 0)
+ 
++    return g_strdup ("");
++    GST_DEBUG_OBJECT (overlay, "current time: %s", buf);
++
++  switch(overlay->time_mode)
++  {
++    case GST_CLOCK_OVERLAY_TIME_MODE_BUFFER_TIME:
++      if (G_LIKELY ((clock = gst_element_get_clock(GST_ELEMENT_CAST(overlay))))){
++        GstClockTime gst_now, gst_base_time, gst_running_time, ts_buffer, buf_running_time;
++        time_t first_buf_time;
++        struct tm *first_buf_tm;
++        GstSegment *segment;
++        GstBaseTextOverlay *textoverlay;
++        textoverlay = GST_BASE_TEXT_OVERLAY (overlay);
++        segment = &textoverlay->segment;
++          
++        /* Extracting buffer's timestamp */
++        ts_buffer = GST_BUFFER_TIMESTAMP (video_frame);
++        if (!GST_CLOCK_TIME_IS_VALID (ts_buffer)) {
++          GST_DEBUG ("buffer without valid timestamp");
++          return g_strdup ("");
++        }
++
++        /* calculating pipeline's running_time */
++        gst_now = gst_clock_get_time(clock);
++        gst_base_time = gst_element_get_base_time(GST_ELEMENT_CAST(overlay));
++        gst_running_time = gst_segment_to_running_time (segment, GST_FORMAT_TIME, gst_now);;
++        buf_running_time = gst_segment_to_stream_time (segment, GST_FORMAT_TIME, ts_buffer); 
++        GST_DEBUG_OBJECT (overlay, "gst_now: %" GST_STIME_FORMAT
++            "gst_base_time: %" GST_STIME_FORMAT "gst_running_time: %" GST_STIME_FORMAT
++            "buf_running_time: %" GST_STIME_FORMAT "buffer_ts: %" GST_STIME_FORMAT,
++            GST_STIME_ARGS (gst_now), GST_STIME_ARGS (gst_base_time),GST_STIME_ARGS (gst_running_time),
++            GST_STIME_ARGS (buf_running_time), GST_STIME_ARGS (ts_buffer));
++
++        /* Buffer's clock time based on buffer's timestamp */
++        t->tm_sec = t->tm_sec - GST_TIME_AS_SECONDS((GstClockTimeDiff)((gst_running_time) - (buf_running_time)));
++        first_buf_time = mktime(t);
++#ifdef HAVE_LOCALTIME_R
++        first_buf_tm = localtime_r (&first_buf_time, &dummy);
++#else
++        first_buf_tm = localtime (&first_buf_time);
++#endif
++        if (first_buf_tm == NULL){
++          return g_strdup ("--:--:--");
++        }
++
++        if (strftime(buf, sizeof(buf), overlay->format, first_buf_tm) == 0)
++          return g_strdup ("");
++        
++        GST_DEBUG_OBJECT (overlay, "buffer time: %s", buf);
++        gst_object_unref(clock);
++      }
++      break;
++    case GST_CLOCK_OVERLAY_TIME_MODE_DEFAULT:
++      if (strftime (buf, sizeof (buf), overlay->format, t) == 0)
++        return g_strdup ("");
++  }
+   return g_strdup (buf);
+ #endif
+ }
+@@ -127,8 +204,10 @@ gst_clock_overlay_get_text (GstBaseTextOverlay * overlay,
+ 
+   txt = g_strdup (overlay->default_text);
+ 
++  time_str = gst_clock_overlay_render_time (clock_overlay, video_frame);
++
+   GST_OBJECT_LOCK (overlay);
+-  time_str = gst_clock_overlay_render_time (clock_overlay);
++
+   GST_OBJECT_UNLOCK (overlay);
+ 
+   if (txt != NULL && *txt != '\0') {
+@@ -171,6 +250,11 @@ gst_clock_overlay_class_init (GstClockOverlayClass * klass)
+       "Tim-Philipp Müller <tim@centricular.net>");
+ 
+   gsttextoverlay_class->get_text = gst_clock_overlay_get_text;
++  
++  g_object_class_install_property (gobject_class, PROP_TIME_MODE,
++      g_param_spec_enum ("time-mode", "Time Mode", "What time to show",
++          GST_TYPE_CLOCK_OVERLAY_TIME_MODE, DEFAULT_TIME_MODE,
++          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+ 
+   g_object_class_install_property (gobject_class, PROP_TIMEFORMAT,
+       g_param_spec_string ("time-format", "Date/Time Format",
+@@ -206,6 +290,7 @@ gst_clock_overlay_init (GstClockOverlay * overlay)
+   textoverlay->valign = GST_BASE_TEXT_OVERLAY_VALIGN_TOP;
+   textoverlay->halign = GST_BASE_TEXT_OVERLAY_HALIGN_LEFT;
+ 
++  overlay->time_mode = DEFAULT_TIME_MODE;
+   overlay->format = g_strdup (DEFAULT_PROP_TIMEFORMAT);
+ 
+ #ifdef G_OS_WIN32
+@@ -237,6 +322,9 @@ gst_clock_overlay_set_property (GObject * object, guint prop_id,
+ 
+   GST_OBJECT_LOCK (overlay);
+   switch (prop_id) {
++    case PROP_TIME_MODE:
++      g_atomic_int_set (&overlay->time_mode, g_value_get_enum (value));
++      break;
+     case PROP_TIMEFORMAT:
+       g_free (overlay->format);
+       overlay->format = g_value_dup_string (value);
+@@ -264,6 +352,9 @@ gst_clock_overlay_get_property (GObject * object, guint prop_id,
+ 
+   GST_OBJECT_LOCK (overlay);
+   switch (prop_id) {
++    case PROP_TIME_MODE:
++      g_value_set_enum (value, g_atomic_int_get (&overlay->time_mode));
++      break;
+     case PROP_TIMEFORMAT:
+       g_value_set_string (value, overlay->format);
+       break;
+diff --git a/ext/pango/gstclockoverlay.h b/ext/pango/gstclockoverlay.h
+index 3a52c35ac3..3e7959fc35 100644
+--- a/_p2_/ext/pango/gstclockoverlay.h
++++ b/_p2_/ext/pango/gstclockoverlay.h
+@@ -40,6 +40,11 @@ G_BEGIN_DECLS
+ typedef struct _GstClockOverlay GstClockOverlay;
+ typedef struct _GstClockOverlayClass GstClockOverlayClass;
+ 
++typedef enum {
++  GST_CLOCK_OVERLAY_TIME_MODE_DEFAULT,
++  GST_CLOCK_OVERLAY_TIME_MODE_BUFFER_TIME
++} GstClockOverlayTimeMode;
++
+ /**
+  * GstClockOverlay:
+  *
+@@ -53,6 +58,8 @@ struct _GstClockOverlay {
+   gunichar2     *wformat;
+ 
+   gchar         *text;
++  /*< private >*/
++  GstClockOverlayTimeMode time_mode;
+ };
+ 
+ struct _GstClockOverlayClass {

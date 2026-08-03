@@ -4,6 +4,19 @@ class Recipe(custom.GStreamer):
     name = 'gst-plugins-good-1.0'
     btype = BuildType.MESON
     tarball_checksum = '58b45d24a1d77b39d7bb7d9ccc6e2d76bbf28618998c335c163f18e6f94a9324'
+
+    # --- BEGIN futurestandard custom patches ---
+    # strip = 2: see the matching comment in gst-plugins-base-1.0.recipe.
+    # Order matters: 0000 adds the brand-new gstrtpmp2pdepay.c/.h source
+    # files themselves, and 0001 then wires the new element into
+    # gstrtp.c/gstrtpelements.h/meson.build.
+    strip = 2
+    patches = [
+        'gst-plugins-good-1.0/0000-add-gstrtpmp2pdepay-source-files.patch',
+        'gst-plugins-good-1.0/0001-add-rtpmp2pdepay-element.patch',
+        'gst-plugins-good-1.0/0002-multifilesink-add-filename-time.patch',
+    ]
+    # --- END futurestandard custom patches ---
     meson_options = {# enabled plugins
                      'amrnb': 'enabled',
                      'amrwbdec': 'enabled',

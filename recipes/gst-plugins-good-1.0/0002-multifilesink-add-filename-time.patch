@@ -1,0 +1,139 @@
+diff --git a/gst/multifile/gstmultifilesink.c b/gst/multifile/gstmultifilesink.c
+index acee9b81b8..3cd01bf1c3 100644
+--- a/_p2_/gst/multifile/gstmultifilesink.c
++++ b/_p2_/gst/multifile/gstmultifilesink.c
+@@ -88,6 +88,8 @@ GST_DEBUG_CATEGORY_STATIC (gst_multi_file_sink_debug);
+ #define DEFAULT_MAX_FILE_DURATION GST_CLOCK_TIME_NONE
+ #define DEFAULT_AGGREGATE_GOPS FALSE
+ #define DEFAULT_MIN_KEYFRAME_DISTANCE (10 * GST_SECOND)
++#define DEFAULT_CURRENT_DATETIME "%s"
++#define DEFAULT_FILENAME_TIME FALSE
+ 
+ enum
+ {
+@@ -100,7 +102,8 @@ enum
+   PROP_MAX_FILE_SIZE,
+   PROP_MAX_FILE_DURATION,
+   PROP_AGGREGATE_GOPS,
+-  PROP_MIN_KEYFRAME_DISTANCE
++  PROP_MIN_KEYFRAME_DISTANCE,
++  PROP_FILENAME_TIME
+ };
+ 
+ static void gst_multi_file_sink_finalize (GObject * object);
+@@ -273,6 +276,14 @@ gst_multi_file_sink_class_init (GstMultiFileSinkClass * klass)
+           "Minimum distance between keyframes to start a new file", 0,
+           G_MAXUINT64, DEFAULT_MIN_KEYFRAME_DISTANCE,
+           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
++  /**
++   * GstMultiFileSink:filename-time:
++   * Output video file name postfix add datetime
++   */
++  g_object_class_install_property (gobject_class, PROP_FILENAME_TIME,
++      g_param_spec_boolean ("filename-time", "FILENAME TIME",
++          "Output video file name postfix add datetime",
++          DEFAULT_FILENAME_TIME, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+ 
+   gobject_class->finalize = gst_multi_file_sink_finalize;
+ 
+@@ -315,6 +326,9 @@ gst_multi_file_sink_init (GstMultiFileSink * multifilesink)
+ 
+   multifilesink->next_segment = GST_CLOCK_TIME_NONE;
+   multifilesink->force_key_unit_count = -1;
++
++  multifilesink->current_datetime = g_strdup (DEFAULT_CURRENT_DATETIME);
++  multifilesink->filename_time = DEFAULT_FILENAME_TIME;
+ }
+ 
+ static void
+@@ -372,6 +386,9 @@ gst_multi_file_sink_set_property (GObject * object, guint prop_id,
+     case PROP_MIN_KEYFRAME_DISTANCE:
+       sink->min_keyframe_distance = g_value_get_uint64 (value);
+       break;
++    case PROP_FILENAME_TIME:
++      sink->filename_time = g_value_get_boolean (value);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -412,6 +429,9 @@ gst_multi_file_sink_get_property (GObject * object, guint prop_id,
+     case PROP_MIN_KEYFRAME_DISTANCE:
+       g_value_set_uint64 (value, sink->min_keyframe_distance);
+       break;
++    case PROP_FILENAME_TIME:
++      g_value_set_boolean (value, sink->filename_time);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -1063,6 +1083,27 @@ stdio_write_error:
+   }
+ }
+ 
++static gchar* get_formatted_datetime() {
++    GstDateTime *now = gst_date_time_new_now_local_time();
++
++    if (!now) {
++        return g_strdup_printf("No");
++    }
++
++    gchar *datetime_str = gst_date_time_to_iso8601_string(now);
++    gst_date_time_unref(now);
++
++    // Use g_strdelimit() to replace 'T' with '-'
++    if (datetime_str) {
++        gchar *formatted_str = g_strdup(datetime_str);
++        g_strdelimit(formatted_str, "T", '-');  // Replace 'T' with '-'
++        g_free(datetime_str);
++        return formatted_str;
++    }
++
++    return g_strdup_printf("No");
++}
++
+ static gboolean
+ gst_multi_file_sink_open_next_file (GstMultiFileSink * multifilesink)
+ {
+@@ -1072,7 +1113,15 @@ gst_multi_file_sink_open_next_file (GstMultiFileSink * multifilesink)
+ 
+   gst_multi_file_sink_ensure_max_files (multifilesink);
+ 
+-  filename = g_strdup_printf (multifilesink->filename, multifilesink->index);
++  GST_INFO_OBJECT (multifilesink, "File name time is %d", multifilesink->filename_time);
++
++  if (multifilesink->filename_time){
++    multifilesink->current_datetime = get_formatted_datetime();
++    filename = g_strdup_printf (multifilesink->filename, multifilesink->current_datetime);
++  }
++  else
++    filename = g_strdup_printf (multifilesink->filename, multifilesink->index);
++
+   multifilesink->file = g_fopen (filename, "wb");
+   if (multifilesink->file == NULL) {
+     g_free (filename);
+@@ -1097,7 +1146,10 @@ gst_multi_file_sink_close_file (GstMultiFileSink * multifilesink,
+   multifilesink->file = NULL;
+ 
+   if (buffer) {
+-    filename = g_strdup_printf (multifilesink->filename, multifilesink->index);
++    if (multifilesink->filename_time)
++      filename = g_strdup_printf (multifilesink->filename, multifilesink->current_datetime);
++    else
++      filename = g_strdup_printf (multifilesink->filename, multifilesink->index);
+     gst_multi_file_sink_post_message (multifilesink, buffer, filename);
+     g_free (filename);
+   }
+diff --git a/gst/multifile/gstmultifilesink.h b/gst/multifile/gstmultifilesink.h
+index bd7eb2a83e..263fc859f0 100644
+--- a/_p2_/gst/multifile/gstmultifilesink.h
++++ b/_p2_/gst/multifile/gstmultifilesink.h
+@@ -80,6 +80,8 @@ struct _GstMultiFileSink
+ {
+   GstBaseSink parent;
+ 
++  gchar *current_datetime;
++  gboolean filename_time;
+   gchar *filename;
+   gint index;
+   gboolean post_messages;
+

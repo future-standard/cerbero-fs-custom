@@ -1,0 +1,35 @@
+diff --git a/gst/mpegdemux/gstmpegdemux.c b/gst/mpegdemux/gstmpegdemux.c
+index bfbe0d9d45..72a9ee48c3 100644
+--- a/_p2_/gst/mpegdemux/gstmpegdemux.c
++++ b/_p2_/gst/mpegdemux/gstmpegdemux.c
+@@ -1842,14 +1842,14 @@ gst_ps_demux_parse_pack_start (GstPsDemux * demux)
+     /* our SCR timeline might have offset wrt upstream timeline */
+     if (demux->sink_segment.format == GST_FORMAT_TIME) {
+       if (demux->sink_segment.start > demux->base_time)
+-        diff = -(demux->sink_segment.start - demux->base_time);
++        diff = demux->sink_segment.start - demux->base_time;
+       else
+         diff = demux->base_time - demux->sink_segment.start;
+-      if (diff > GST_SECOND) {
++      if (abs(diff) > GST_SECOND) {
+         GST_DEBUG_OBJECT (demux, "diff of %" GST_TIME_FORMAT
+             " wrt upstream start %" GST_TIME_FORMAT "; adjusting base",
+             GST_TIME_ARGS (diff), GST_TIME_ARGS (demux->sink_segment.start));
+-        demux->base_time += diff;
++	 demux->base_time -= diff;
+       }
+     }
+   } else if (G_LIKELY (demux->first_scr_offset != demux->cur_scr_offset)) {
+diff --git a/gst/videoparsers/gstmpegvideoparse.c b/gst/videoparsers/gstmpegvideoparse.c
+index f8ef31a1b9..6c8e1a5793 100644
+--- a/_p2_/gst/videoparsers/gstmpegvideoparse.c
++++ b/_p2_/gst/videoparsers/gstmpegvideoparse.c
+@@ -177,7 +177,7 @@ gst_mpegv_parse_init (GstMpegvParse * parse)
+ {
+   parse->config_flags = FLAG_NONE;
+ 
+-  gst_base_parse_set_pts_interpolation (GST_BASE_PARSE (parse), FALSE);
++  gst_base_parse_set_pts_interpolation (GST_BASE_PARSE (parse), TRUE);
+   gst_base_parse_set_infer_ts (GST_BASE_PARSE (parse), FALSE);
+   GST_PAD_SET_ACCEPT_INTERSECT (GST_BASE_PARSE_SINK_PAD (parse));
+   GST_PAD_SET_ACCEPT_TEMPLATE (GST_BASE_PARSE_SINK_PAD (parse));

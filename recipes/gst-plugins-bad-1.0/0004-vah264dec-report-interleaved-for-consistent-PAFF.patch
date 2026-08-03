@@ -1,0 +1,198 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH] vah264dec: report INTERLEAVED for consistently-paired PAFF streams
+
+vah264dec unconditionally reported GST_VIDEO_INTERLACE_MODE_MIXED for any
+sequence with frame_mbs_only_flag == 0 (i.e. any PAFF stream), even when the
+stream actually consists of a perfectly regular sequence of top/bottom field
+pairs with a stable field order. Such a stream should be described as
+GST_VIDEO_INTERLACE_MODE_INTERLEAVED.
+
+"mixed" means "frames may be progressive or interlaced, and this can change
+per buffer", which is a much weaker guarantee. Several downstream elements
+handle "mixed" poorly or take slower/less correct code paths for it (see for
+example the d3d11compositor case in
+https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5088), so
+reporting it when not necessary is actively harmful.
+
+This patch keeps track of the field structure of the pictures that are
+actually decoded:
+
+  * On a new sequence with frame_mbs_only_flag == 0, optimistically assume
+    INTERLEAVED.
+  * For every picture, gst_va_h264_dec_update_interlace_mode() inspects
+    picture->field. If a frame picture shows up in the middle of field
+    pictures, or if the first-field parity (top-field-first) changes, fall
+    back to MIXED and re-negotiate.
+
+This mirrors the same distinction that upstream later tried to introduce in
+h264parse, see
+https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5011 and
+merge request !11203 (which was closed without being merged, so h264parse
+still has the coarse behaviour).
+
+Verified on an Intel N150 iGPU with a 1920x1080i H.264 stream received over
+RTP/MPEG-2 TS: the decoder now negotiates interlace-mode=interleaved and no
+fallback to mixed is triggered.
+
+Note: this patch is independent of the kmssink 30fps/vsync issue; that one is
+solved by setting kmssink skip-vsync=true (double vsync between
+drmModeSetPlane and drmModePageFlip).
+--- a/_p2_/sys/va/gstvah264dec.c
++++ b/_p2_/sys/va/gstvah264dec.c
+@@ -81,6 +81,19 @@
+   GArray *ref_list;
+ 
+   gboolean interlaced;
++
++  /* Local fix: track whether the stream actually has a consistent
++   * top/bottom field pairing (truly INTERLEAVED) instead of always
++   * reporting GST_VIDEO_INTERLACE_MODE_MIXED whenever
++   * frame_mbs_only_flag == 0 (PAFF streams). See
++   * gst_va_h264_dec_new_picture() and gst_va_h264_dec_new_sequence().
++   * Upstream tracking: https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5011
++   */
++  gboolean have_interlacing_info;
++  gboolean saw_frame_picture;
++  gboolean field_order_known;
++  gboolean top_field_first;
++  GstVideoInterlaceMode resolved_interlace_mode;
+ };
+ 
+ static GstElementClass *parent_class = NULL;
+@@ -94,6 +107,11 @@
+ 
+ static const gchar *sink_caps_str = "video/x-h264";
+ 
++/* Local fix: forward declaration, see definition and struct comment
++ * above for rationale. */
++static void gst_va_h264_dec_update_interlace_mode (GstVaH264Dec * self,
++    GstH264Picture * picture);
++
+ static GstFlowReturn
+ gst_va_h264_dec_end_picture (GstH264Decoder * decoder, GstH264Picture * picture)
+ {
+@@ -366,6 +384,24 @@
+   guint i;
+   GArray *ref_list = self->ref_list;
+ 
++  /* Local fix: refine interlace-mode using the actual field pairing
++   * observed so far (see gst_va_h264_dec_update_interlace_mode() and
++   * struct comment above). Re-negotiate if the resolved mode differs
++   * from what was last reported on the output caps. */
++  if (self->have_interlacing_info) {
++    gst_va_h264_dec_update_interlace_mode (self, picture);
++
++    if (GST_VIDEO_INFO_INTERLACE_MODE (&base->output_info) !=
++        self->resolved_interlace_mode) {
++      GST_INFO_OBJECT (self,
++          "Refining interlace-mode to %d based on observed field pairing",
++          self->resolved_interlace_mode);
++      GST_VIDEO_INFO_INTERLACE_MODE (&base->output_info) =
++          self->resolved_interlace_mode;
++      base->need_negotiation = TRUE;
++    }
++  }
++
+   va_pic = gst_h264_picture_get_user_data (picture);
+ 
+   pps = slice->header.pps;
+@@ -506,6 +542,68 @@
+   }
+ }
+ 
++/* Local fix: for PAFF streams (frame_mbs_only_flag == 0), the previous
++ * code in gst_va_h264_dec_new_sequence() unconditionally reported
++ * GST_VIDEO_INTERLACE_MODE_MIXED, which several downstream elements
++ * (e.g. vadeinterlace + kmssink) do not handle well, causing incorrect
++ * playback (framerate/PTS mishandling, or even dropped buffers) even
++ * though the stream is actually a consistently-paired, true interlaced
++ * (top/bottom field pairs, always same field order) sequence, which
++ * should be reported as GST_VIDEO_INTERLACE_MODE_INTERLEAVED instead.
++ * This mirrors the same distinction later added to h264parse upstream:
++ * https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5011
++ *
++ * We inspect each decoded picture's field type/order (available once
++ * new_picture()/new_field_picture() have run and picture->field and
++ * the field pairing are known) and only fall back to MIXED if we
++ * actually observe a frame picture mixed in with fields, or a change in
++ * top-field-first ordering. */
++static void
++gst_va_h264_dec_update_interlace_mode (GstVaH264Dec * self,
++    GstH264Picture * picture)
++{
++  gboolean top_field_first;
++
++  if (!self->have_interlacing_info)
++    return;
++
++  if (GST_H264_PICTURE_IS_FRAME (picture)) {
++    if (!self->saw_frame_picture) {
++      self->saw_frame_picture = TRUE;
++      if (self->resolved_interlace_mode != GST_VIDEO_INTERLACE_MODE_MIXED) {
++        GST_DEBUG_OBJECT (self,
++            "Frame picture found in a field-coded sequence, "
++            "falling back to interlace-mode=mixed");
++        self->resolved_interlace_mode = GST_VIDEO_INTERLACE_MODE_MIXED;
++      }
++    }
++    return;
++  }
++
++  /* Only consider the first field of a field pair (or a lone field) to
++   * determine field order; the paired second field is the complementary
++   * parity by construction and carries no extra ordering information. */
++  if (picture->second_field)
++    return;
++
++  top_field_first = (picture->field == GST_H264_PICTURE_FIELD_TOP_FIELD);
++
++  if (!self->field_order_known) {
++    self->field_order_known = TRUE;
++    self->top_field_first = top_field_first;
++    return;
++  }
++
++  if (self->top_field_first != top_field_first &&
++      self->resolved_interlace_mode != GST_VIDEO_INTERLACE_MODE_MIXED) {
++    GST_DEBUG_OBJECT (self,
++        "Field order changed (top-field-first %d -> %d), "
++        "falling back to interlace-mode=mixed", self->top_field_first,
++        top_field_first);
++    self->resolved_interlace_mode = GST_VIDEO_INTERLACE_MODE_MIXED;
++  }
++}
++
+ static GstFlowReturn
+ gst_va_h264_dec_new_field_picture (GstH264Decoder * decoder,
+     GstH264Picture * first_field, GstH264Picture * second_field)
+@@ -707,8 +805,28 @@
+   interlaced = !sps->frame_mbs_only_flag;
+   if (self->interlaced != interlaced) {
+     self->interlaced = interlaced;
+-    GST_VIDEO_INFO_INTERLACE_MODE (info) = interlaced ?
+-        GST_VIDEO_INTERLACE_MODE_MIXED : GST_VIDEO_INTERLACE_MODE_PROGRESSIVE;
++
++    /* Local fix: do not immediately assume MIXED for field-coded (PAFF)
++     * sequences. Start by optimistically assuming a consistently-paired
++     * true interlaced (INTERLEAVED) stream, and let
++     * gst_va_h264_dec_update_interlace_mode() (called for every decoded
++     * picture from start_picture()) downgrade to MIXED only if we
++     * actually observe a frame picture mixed in with fields, or a
++     * change in top-field-first ordering. This avoids downstream
++     * elements (e.g. vadeinterlace + kmssink) mishandling a perfectly
++     * regular interlaced stream that was being reported as "mixed"
++     * purely because frame_mbs_only_flag == 0 at the SPS level.
++     * See struct _GstVaH264Dec comment above and
++     * https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5011
++     * for the equivalent upstream discussion in h264parse. */
++    self->have_interlacing_info = interlaced;
++    self->saw_frame_picture = FALSE;
++    self->field_order_known = FALSE;
++    self->resolved_interlace_mode = interlaced ?
++        GST_VIDEO_INTERLACE_MODE_INTERLEAVED :
++        GST_VIDEO_INTERLACE_MODE_PROGRESSIVE;
++
++    GST_VIDEO_INFO_INTERLACE_MODE (info) = self->resolved_interlace_mode;
+     negotiation_needed = TRUE;
+     GST_INFO_OBJECT (self, "Interlaced mode changed to %d", interlaced);
+   }

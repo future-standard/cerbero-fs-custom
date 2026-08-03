@@ -1,0 +1,97 @@
+diff --git a/gst/mpegtsdemux/tsdemux.c b/gst/mpegtsdemux/tsdemux.c
+index 8adefeba67..a4c198cf83 100644
+--- a/_p2_/gst/mpegtsdemux/tsdemux.c
++++ b/_p2_/gst/mpegtsdemux/tsdemux.c
+@@ -302,6 +302,7 @@ enum
+   PROP_EMIT_STATS,
+   PROP_LATENCY,
+   PROP_SEND_SCTE35_EVENTS,
++  PROP_WAIT_PCR,
+   /* FILL ME */
+ };
+ 
+@@ -435,6 +436,11 @@ gst_ts_demux_class_init (GstTSDemuxClass * klass)
+           G_MAXINT, DEFAULT_LATENCY,
+           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+ 
++  g_object_class_install_property (gobject_class, PROP_WAIT_PCR,
++      g_param_spec_boolean ("wait-pcr", "Wait for PCR",
++          "Wait for PCR update before pushing buffers out", TRUE,
++          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
++
+   element_class = GST_ELEMENT_CLASS (klass);
+   gst_element_class_add_pad_template (element_class,
+       gst_static_pad_template_get (&video_template));
+@@ -511,6 +517,7 @@ gst_ts_demux_init (GstTSDemux * demux)
+   demux->flowcombiner = gst_flow_combiner_new ();
+   demux->requested_program_number = -1;
+   demux->program_number = -1;
++  demux->wait_pcr = TRUE;
+   demux->latency = DEFAULT_LATENCY;
+   gst_ts_demux_reset (base);
+ 
+@@ -539,6 +546,9 @@ gst_ts_demux_set_property (GObject * object, guint prop_id,
+     case PROP_LATENCY:
+       demux->latency = g_value_get_int (value);
+       break;
++    case PROP_WAIT_PCR:
++      demux->wait_pcr = g_value_get_boolean (value);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+   }
+@@ -563,6 +573,9 @@ gst_ts_demux_get_property (GObject * object, guint prop_id,
+     case PROP_LATENCY:
+       g_value_set_int (value, demux->latency);
+       break;
++    case PROP_WAIT_PCR:
++      g_value_set_boolean (value, demux->wait_pcr);
++      break;
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+   }
+@@ -3445,7 +3458,8 @@ gst_ts_demux_push_pending_data (GstTSDemux * demux, TSDemuxStream * stream,
+       buffer = gst_buffer_new_wrapped (stream->data, stream->current_size);
+     }
+ 
+-    if (G_UNLIKELY (stream->pending_ts && !check_pending_buffers (demux))) {
++    if (G_UNLIKELY (demux->wait_pcr && stream->pending_ts
++            && !check_pending_buffers (demux))) {
+       if (buffer) {
+         PendingBuffer *pend;
+         pend = g_slice_new0 (PendingBuffer);
+@@ -3504,7 +3518,7 @@ gst_ts_demux_push_pending_data (GstTSDemux * demux, TSDemuxStream * stream,
+       (GST_CLOCK_TIME_IS_VALID (stream->seeked_dts) &&
+           stream->pts < stream->seeked_dts)) {
+     GST_INFO_OBJECT (stream->pad,
+-        "Droping with PTS: %" GST_TIME_FORMAT " DTS: %" GST_TIME_FORMAT
++       "Dropping with PTS: %" GST_TIME_FORMAT " DTS: %" GST_TIME_FORMAT
+         " after seeking as other stream needed to be seeked further"
+         "(seeked PTS: %" GST_TIME_FORMAT " DTS: %" GST_TIME_FORMAT ")",
+         GST_TIME_ARGS (stream->pts), GST_TIME_ARGS (stream->dts),
+@@ -3525,9 +3539,13 @@ gst_ts_demux_push_pending_data (GstTSDemux * demux, TSDemuxStream * stream,
+ 
+   if (GST_CLOCK_TIME_IS_VALID (stream->pts))
+     GST_BUFFER_PTS (buffer) = GST_BUFFER_DTS (buffer) = stream->pts;
++  else
++    GST_BUFFER_PTS (buffer) = MPEG_TS_BASE_PACKETIZER (demux)->last_in_time;
+   /* DTS = PTS by default, we override it if there's a real DTS */
+   if (GST_CLOCK_TIME_IS_VALID (stream->dts))
+     GST_BUFFER_DTS (buffer) = stream->dts;
++  else
++    GST_BUFFER_PTS (buffer) = MPEG_TS_BASE_PACKETIZER (demux)->last_in_time;
+ 
+   if (stream->discont)
+     GST_BUFFER_FLAG_SET (buffer, GST_BUFFER_FLAG_DISCONT);
+diff --git a/gst/mpegtsdemux/tsdemux.h b/gst/mpegtsdemux/tsdemux.h
+index 76be6bb2f3..3f9a5b9aa4 100644
+--- a/_p2_/gst/mpegtsdemux/tsdemux.h
++++ b/_p2_/gst/mpegtsdemux/tsdemux.h
+@@ -77,6 +77,7 @@ struct _GstTSDemux
+   guint program_number;
+   gboolean emit_statistics;
+   gboolean send_scte35_events;
++  gboolean wait_pcr;
+   gint latency; /* latency in ms */
+ 
+   /*< private >*/

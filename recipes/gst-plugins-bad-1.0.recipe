@@ -4,6 +4,18 @@ from cerbero.tools.libtool import LibtoolLibrary
 class Recipe(custom.GStreamer):
     name = 'gst-plugins-bad-1.0'
     btype = BuildType.MESON
+
+    # --- BEGIN futurestandard custom patches ---
+    # strip = 2: see the matching comment in gst-plugins-base-1.0.recipe.
+    strip = 2
+    patches = [
+        'gst-plugins-bad-1.0/0001-h264parse-enable-pts-interpolation.patch',
+        'gst-plugins-bad-1.0/0002-mpegvideoparse-fix-timing.patch',
+        'gst-plugins-bad-1.0/0003-tsdemux-add-wait-pcr-property.patch',
+        'gst-plugins-bad-1.0/0004-vah264dec-report-interleaved-for-consistent-PAFF.patch',
+        'gst-plugins-bad-1.0/0005-h264decoder-recover-from-unpairable-field.patch',
+    ]
+    # --- END futurestandard custom patches ---
     # License path/location is different in tarball vs. monorepo
     if custom.GStreamer.stype == SourceType.TARBALL:
       licenses = [{License.LGPLv2Plus: None, License.BSD_3_Clause: ['ext/sctp/usrsctp/LICENSE.md']}]
@@ -117,6 +129,20 @@ class Recipe(custom.GStreamer):
         'libgstvulkan-1.0',
         'libgstwebrtc-1.0',
         'libgstwebrtcnice-1.0',
+        # --- BEGIN futurestandard custom packaging ---
+        # libgstva-1.0: helper library every 'va' plugin element
+        # (vah264dec, vadeinterlace, vapostproc, vacompositor, ...)
+        # links against. gst-libs/gst/va/meson.build builds it
+        # (gstva = library('gstva-' + api_version, ...)) but upstream
+        # never lists it here, so the shipped libgstva.so plugin fails
+        # to load at runtime with "libgstva-1.0.so.0: cannot open
+        # shared object file" and every VA element silently
+        # disappears. Only actually built when the 'va' meson option
+        # is enabled (see enable_plugin('va', ...) in prepare() below,
+        # gated on the 'va' Cerbero variant), so this entry is simply
+        # unused when that plugin isn't built.
+        'libgstva-1.0',
+        # --- END futurestandard custom packaging ---
     ]
 
     files_plugins_devel = [
@@ -456,6 +482,13 @@ class Recipe(custom.GStreamer):
         Platform.LINUX: [
              '%(libdir)s/gstreamer-1.0/libgstshm%(mext)s',
              '%(libdir)s/gstreamer-1.0/libgstdecklink%(mext)s',
+             # futurestandard custom packaging: kmssink. The 'kms' meson
+             # option is 'auto' and gets enabled whenever libdrm is
+             # present (already a Platform.LINUX platform_dep above),
+             # but upstream's platform_files_plugins_sys never lists
+             # the resulting plugin for any platform, so it is built
+             # but never shipped in the package.
+             '%(libdir)s/gstreamer-1.0/libgstkms%(mext)s',
             ],
         Platform.WINDOWS: [
              '%(libdir)s/gstreamer-1.0/libgstd3d%(mext)s',
@@ -486,6 +519,9 @@ class Recipe(custom.GStreamer):
         Platform.LINUX: [
              '%(libdir)s/gstreamer-1.0/libgstshm.a', '%(libdir)s/gstreamer-1.0/libgstshm.la',
              '%(libdir)s/gstreamer-1.0/libgstdecklink.a', '%(libdir)s/gstreamer-1.0/libgstdecklink.la',
+             # futurestandard custom packaging: kmssink devel files (see
+             # matching comment in platform_files_plugins_sys above).
+             '%(libdir)s/gstreamer-1.0/libgstkms.a', '%(libdir)s/gstreamer-1.0/libgstkms.la',
             ],
         Platform.WINDOWS: [
              '%(libdir)s/gstreamer-1.0/libgstd3d.a', '%(libdir)s/gstreamer-1.0/libgstd3d.la',
