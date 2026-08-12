@@ -1,0 +1,57 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH] mpeg2decoder: flag interlaced frame pictures
+
+gstmpeg2decoder only set GST_VIDEO_BUFFER_FLAG_INTERLACED (and _TFF) on the
+second picture of a field-picture pair. Frame pictures were never flagged,
+not even when the sequence is interlaced (progressive_sequence == 0) and the
+picture itself is interlaced (progressive_frame == 0) — which is how ordinary
+broadcast MPEG-2 is coded: frame pictures holding two temporally distinct
+fields, with top_field_first giving their order.
+
+Since vampeg2dec reports interlace-mode=mixed for any non-progressive
+sequence, and "mixed" means "look at the per-buffer flags", the missing flags
+made every downstream element treat those frames as progressive. Concretely,
+gst_va_buffer_get_surface_flags() returned VA_FRAME_PICTURE, so
+vadeinterlace never called _set_field() and handed the surface to the VPP as
+a progressive frame picture: the output was doubled to field rate
+(30000/1001 -> 60000/1001) while no field interpolation based on the
+stream's own field order took place.
+
+Traced on an Intel i5-7260U iGPU with a 720x480i MPEG-2 stream received over
+RTP/MPEG-2 PS (progressive_sequence=0, and every picture
+picture_structure=frame, progressive_frame=0, top_field_first=1):
+
+  vampeg2dec  ... new_picture x327, new_field_picture x0
+  vampeg2dec  ... "apply buffer flags" never logged (buffer_flags == 0)
+  vadeinterlace ... Processing 1 field (flags = 0)   x326
+  vadeinterlace ... Processing 2 field (flags = 0)   x326
+
+With this patch the frame pictures carry INTERLACED | TFF, so the VPP
+receives VA_TOP_FIELD / VA_BOTTOM_FIELD as intended.
+
+repeat_first_field is deliberately not translated into
+GST_VIDEO_BUFFER_FLAG_RFF here: that flag also affects buffer duration
+handling downstream, which is out of scope for this fix.
+
+--- a/_p2_/gst-libs/gst/codecs/gstmpeg2decoder.c
++++ b/_p2_/gst-libs/gst/codecs/gstmpeg2decoder.c
+@@ -905,6 +905,19 @@
+     }
+ 
+     picture->structure = GST_MPEG_VIDEO_PICTURE_STRUCTURE_FRAME;
++
++    /* Local fix: a frame picture with progressive_frame == 0 still holds
++     * two temporally distinct, interleaved fields, and top_field_first
++     * gives their order. Only the field-picture branch below used to set
++     * these flags, so every element that relies on the per-buffer flags
++     * (which is what interlace-mode=mixed mandates, e.g. vadeinterlace
++     * through gst_va_buffer_get_surface_flags()) treated such frames as
++     * progressive and did not deinterlace them. */
++    if (!priv->progressive && !priv->pic_ext.progressive_frame) {
++      picture->buffer_flags |= GST_VIDEO_BUFFER_FLAG_INTERLACED;
++      if (priv->pic_ext.top_field_first)
++        picture->buffer_flags |= GST_VIDEO_BUFFER_FLAG_TFF;
++    }
+   } else {
+     if (!priv->first_field) {
+       picture = gst_mpeg2_picture_new ();

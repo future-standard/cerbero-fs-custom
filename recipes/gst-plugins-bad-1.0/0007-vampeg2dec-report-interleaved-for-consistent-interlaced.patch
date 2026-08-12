@@ -1,0 +1,199 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH] vampeg2dec: report INTERLEAVED for consistently ordered interlaced streams
+
+vampeg2dec derived interlace-mode from the sequence extension alone: any
+stream with progressive_sequence == 0 was reported as
+GST_VIDEO_INTERLACE_MODE_MIXED, no matter how uniform the pictures actually
+are.
+
+"mixed" means "frames may be progressive or interlaced, and this can change
+per buffer", which is a much weaker guarantee than a plain interlaced stream
+and forces every downstream element onto the per-buffer-flag path (see
+gst_va_buffer_get_surface_flags(), and the d3d11compositor case in
+https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5088).
+Ordinary broadcast MPEG-2 — frame pictures with progressive_frame == 0 and a
+constant top_field_first — is a consistently ordered interlaced stream and
+should be reported as GST_VIDEO_INTERLACE_MODE_INTERLEAVED.
+
+This is the MPEG-2 counterpart of
+0004-vah264dec-report-interleaved-for-consistent-PAFF.patch, which made the
+same distinction for H.264 PAFF streams; see
+https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5011
+
+The sequence starts out optimistically assuming INTERLEAVED, and
+gst_va_mpeg2_dec_update_interlace_mode(), called for every picture from
+start_picture(), falls back to MIXED (sticky for the sequence, with a
+re-negotiation) as soon as the stream stops being uniform:
+
+  * progressive_frame == 1, i.e. a progressive frame among interlaced ones,
+  * a field-coded picture (picture_structure != FRAME), whose field parity is
+    given by picture_structure rather than top_field_first and is therefore
+    better described per buffer,
+  * a change of the top_field_first ordering.
+
+Verified on an Intel i5-7260U iGPU with a 720x480i MPEG-2 stream received
+over RTP/MPEG-2 PS: the decoder now negotiates interlace-mode=interleaved and
+no fallback to mixed is triggered.
+
+Note that field-order is intentionally left out of the caps (as in the H.264
+patch): gst_va_base_dec_set_output_state() builds the output state from the
+interlace mode only, so GST_VIDEO_INFO_FIELD_ORDER() would not reach the
+caps. The field order is carried per buffer by GST_VIDEO_BUFFER_FLAG_TFF,
+which 0006-mpeg2decoder-flag-interlaced-frame-pictures.patch makes correct
+for frame pictures.
+
+--- a/_p2_/sys/va/gstvampeg2dec.c
++++ b/_p2_/sys/va/gstvampeg2dec.c
+@@ -72,6 +72,18 @@
+ 
+   gboolean progressive;
+   GstMpegVideoSequenceHdr seq;
++
++  /* Local fix: track whether the pictures actually decoded so far form a
++   * consistently ordered interlaced stream (truly INTERLEAVED) instead of
++   * always reporting GST_VIDEO_INTERLACE_MODE_MIXED whenever
++   * progressive_sequence == 0. See gst_va_mpeg2_dec_update_interlace_mode()
++   * and gst_va_mpeg2_dec_new_sequence().
++   * Upstream tracking: https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5011
++   */
++  gboolean have_interlacing_info;
++  gboolean field_order_known;
++  gboolean top_field_first;
++  GstVideoInterlaceMode resolved_interlace_mode;
+ };
+ 
+ static GstElementClass *parent_class = NULL;
+@@ -85,6 +97,11 @@
+ 
+ static const gchar *sink_caps_str = "video/x-mpeg2";
+ 
++/* Local fix: forward declaration, see definition and struct comment
++ * above for rationale. */
++static void gst_va_mpeg2_dec_update_interlace_mode (GstVaMpeg2Dec * self,
++    const GstMpegVideoPictureExt * pic_ext);
++
+ static VAProfile
+ _map_profile (GstMpegVideoProfile profile)
+ {
+@@ -222,8 +239,22 @@
+   progressive = seq_ext ? seq_ext->progressive : 1;
+   if (self->progressive != progressive) {
+     self->progressive = progressive;
+-    GST_VIDEO_INFO_INTERLACE_MODE (info) = progressive ?
+-        GST_VIDEO_INTERLACE_MODE_PROGRESSIVE : GST_VIDEO_INTERLACE_MODE_MIXED;
++
++    /* Local fix: do not immediately assume MIXED for a non-progressive
++     * sequence. Start by optimistically assuming a consistently ordered
++     * true interlaced (INTERLEAVED) stream, and let
++     * gst_va_mpeg2_dec_update_interlace_mode() (called for every picture
++     * from start_picture()) downgrade to MIXED only when the pictures
++     * really are mixed: a progressive_frame showing up, a field-coded
++     * picture, or a change in top_field_first ordering. See the struct
++     * comment above for the rationale. */
++    self->have_interlacing_info = !progressive;
++    self->field_order_known = FALSE;
++    self->resolved_interlace_mode = progressive ?
++        GST_VIDEO_INTERLACE_MODE_PROGRESSIVE :
++        GST_VIDEO_INTERLACE_MODE_INTERLEAVED;
++
++    GST_VIDEO_INFO_INTERLACE_MODE (info) = self->resolved_interlace_mode;
+     negotiation_needed = TRUE;
+     GST_INFO_OBJECT (self, "Interlaced mode changed to %d", !progressive);
+   }
+@@ -360,6 +391,71 @@
+       VAIQMatrixBufferType, &iq_matrix, sizeof (iq_matrix));
+ }
+ 
++/* Local fix: for non-progressive sequences (progressive_sequence == 0) the
++ * previous code in gst_va_mpeg2_dec_new_sequence() unconditionally reported
++ * GST_VIDEO_INTERLACE_MODE_MIXED. "mixed" means "each buffer may be
++ * progressive or interlaced", which is a much weaker guarantee than a plain
++ * interlaced stream, and it forces every downstream element to rely on the
++ * per-buffer GST_VIDEO_BUFFER_FLAG_INTERLACED / _TFF flags. Ordinary
++ * broadcast MPEG-2 (e.g. 720x480i or 1920x1080i, frame pictures with
++ * progressive_frame == 0 and a constant top_field_first) is a consistently
++ * ordered interlaced stream and should be reported as
++ * GST_VIDEO_INTERLACE_MODE_INTERLEAVED instead.
++ *
++ * This mirrors the same distinction made for H.264 PAFF streams in
++ * 0004-vah264dec-report-interleaved-for-consistent-PAFF.patch; see
++ * https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5011
++ *
++ * We inspect the picture coding extension of every picture and fall back to
++ * MIXED as soon as the stream stops being uniform:
++ *
++ *   * progressive_frame == 1, i.e. a progressive frame among interlaced ones,
++ *   * a field-coded picture (picture_structure != FRAME), whose field parity
++ *     comes from picture_structure rather than top_field_first, so it is
++ *     described per buffer instead,
++ *   * a change of the top_field_first ordering.
++ *
++ * The decision is sticky: once MIXED, it stays MIXED for the sequence. */
++static void
++gst_va_mpeg2_dec_update_interlace_mode (GstVaMpeg2Dec * self,
++    const GstMpegVideoPictureExt * pic_ext)
++{
++  gboolean top_field_first;
++
++  if (!self->have_interlacing_info
++      || self->resolved_interlace_mode == GST_VIDEO_INTERLACE_MODE_MIXED)
++    return;
++
++  if (pic_ext->progressive_frame) {
++    GST_DEBUG_OBJECT (self, "Progressive frame found in an interlaced "
++        "sequence, falling back to interlace-mode=mixed");
++    self->resolved_interlace_mode = GST_VIDEO_INTERLACE_MODE_MIXED;
++    return;
++  }
++
++  if (pic_ext->picture_structure != GST_MPEG_VIDEO_PICTURE_STRUCTURE_FRAME) {
++    GST_DEBUG_OBJECT (self, "Field-coded picture (picture_structure %d), "
++        "falling back to interlace-mode=mixed", pic_ext->picture_structure);
++    self->resolved_interlace_mode = GST_VIDEO_INTERLACE_MODE_MIXED;
++    return;
++  }
++
++  top_field_first = (pic_ext->top_field_first != 0);
++
++  if (!self->field_order_known) {
++    self->field_order_known = TRUE;
++    self->top_field_first = top_field_first;
++    return;
++  }
++
++  if (self->top_field_first != top_field_first) {
++    GST_DEBUG_OBJECT (self, "Field order changed (top-field-first %d -> %d), "
++        "falling back to interlace-mode=mixed", self->top_field_first,
++        top_field_first);
++    self->resolved_interlace_mode = GST_VIDEO_INTERLACE_MODE_MIXED;
++  }
++}
++
+ static inline uint32_t
+ _is_frame_start (GstMpeg2Picture * picture)
+ {
+@@ -392,6 +488,24 @@
+   GstVaDecodePicture *va_pic;
+   VAPictureParameterBufferMPEG2 pic_param;
+ 
++  /* Local fix: refine interlace-mode using the picture coding extensions
++   * seen so far (see gst_va_mpeg2_dec_update_interlace_mode() and the
++   * struct comment above). Re-negotiate if the resolved mode differs from
++   * what was last reported on the output caps. */
++  if (self->have_interlacing_info) {
++    gst_va_mpeg2_dec_update_interlace_mode (self, slice->pic_ext);
++
++    if (GST_VIDEO_INFO_INTERLACE_MODE (&base->output_info) !=
++        self->resolved_interlace_mode) {
++      GST_INFO_OBJECT (self,
++          "Refining interlace-mode to %d based on the observed pictures",
++          self->resolved_interlace_mode);
++      GST_VIDEO_INFO_INTERLACE_MODE (&base->output_info) =
++          self->resolved_interlace_mode;
++      base->need_negotiation = TRUE;
++    }
++  }
++
+   va_pic = gst_mpeg2_picture_get_user_data (picture);
+ 
+   /* *INDENT-OFF* */
