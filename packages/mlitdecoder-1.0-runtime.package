@@ -31,7 +31,16 @@ class Package(custom.GStreamer, package.Package):
     shortdesc = 'GStreamer runtime for the FS-VD1000'
     longdesc = 'The GStreamer plugins and libraries the FS-VD1000 application uses'
     uuid = '6f2c1a94-3d7e-4a51-9f0c-2b8d5e41c7a3'
-    deps = ['base-system-1.0']
+    # No base-system-1.0. That package carries the whole font and image
+    # rendering stack - cairo, pango, harfbuzz, freetype, fontconfig, gdk-pixbuf,
+    # librsvg, the image codecs - for plugins this product does not ship. It put
+    # 44 shared libraries in the prefix where 28 were reachable and 12 were
+    # needed, and every one of them is a licence to notify and a CVE to watch
+    # for ten years. The libraries the shipped plugins actually link are listed
+    # below instead, and `ldd` over the built prefix is what says whether the
+    # list is right; see scripts/collect-components.py in the mlit-decoder
+    # repository.
+    deps = []
 
     # Each entry is recipe:category. The categories ending in fsvd are file
     # groups added to the recipes for this product, naming the plugins one by
@@ -59,15 +68,11 @@ class Package(custom.GStreamer, package.Package):
 
         # The audio decoders, and the software video fallback when VA is not
         # available. FFmpeg must be built without --enable-gpl; see the note in
-        # packaging/components.json. ffmpeg:libs is what libgstlibav.so links:
-        # without it the plugin is shipped but fails to load, and the unit is
-        # silently left with no audio decoder at all.
-        'ffmpeg:libs',
+        # packaging/components.json. The libraries it links, ffmpeg among
+        # them, are in the list at the end: shipped without them the plugin is
+        # present and fails to load, and the unit is silently left with no
+        # audio decoder at all.
         'gst-libav-1.0:codecs_restricted',
-
-        # libmpg123, which libgstmpg123.so links. MPEG-1 Audio Layer 2 is what
-        # the IP-920D sends, so this is the audio path of the specification.
-        'mpg123:libs',
 
         # rsrtp: rtpmp2tdepay2 and rtpmp2tpay2, the TS and TTS payloaders both
         # modes are built on. MPL-2.0.
@@ -75,9 +80,25 @@ class Package(custom.GStreamer, package.Package):
 
         # The application is Python and drives the pipeline through gi. Without
         # the bindings and the typelibs there is nothing to run.
-        'gobject-introspection:python:typelibs',
+        'gobject-introspection:libs:python:typelibs',
         'gst-python-1.0:python:plugins:libs',
-        'pygobject:python:libs',
+        # The bindings without the cairo module; see files_python_fsvd in the
+        # recipe for what that one module costs.
+        'pygobject:python_fsvd:libs',
+
+        # The libraries the plugins above link, and nothing else. Only libs:
+        # the tools that came with them - gdk-pixbuf-csource, json-glib-format
+        # - are what dragged in gdk-pixbuf, libtiff and libjpeg, and a unit has
+        # no use for a developer utility.
+        'bzip2:libs',        # libgstlibav links it
+        'expat:libs',        # libgstpython links it
+        'ffmpeg:libs',       # the audio decoders and the software fallback
+        'glib:libs',         # the object system and main loop
+        'libffi:libs',       # behind GObject introspection
+        'mpg123:libs',       # MPEG-1 Audio Layer 2
+        'orc:libs',          # the SIMD paths of the base plugins
+        'pcre2:libs',        # the regular expressions inside glib
+        'zlib:libs',         # glib and the muxers
     ]
 
     # Nothing here is developed against on the unit. The headers, the .pc files

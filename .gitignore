@@ -25,3 +25,10 @@ MANIFEST.in
 /gstreamer*.tar.xz
 /gstreamer*.tar.zst
 /gstreamer*.whl
+
+# Build outputs. `cerbero package` writes these into the checkout, so a plain
+# `git add -A` sweeps them in; the devel tarball alone is 130 MB and GitHub
+# refuses anything over 100 MB. The tarballs belong in an artefact archive
+# with their BUILD_INFO beside them, not in git.
+/*.tar.xz
+/*.tar.xz.BUILD_INFO

@@ -14,6 +14,35 @@ class Recipe(recipe.Recipe):
         'tests': False,
     }
 
+    #: futurestandard: the Python bindings without the cairo integration.
+    #: _gi_cairo is what pulls libcairo into the prefix, and behind it
+    #: freetype, fontconfig, pixman, libpng and expat - six projects and four
+    #: licences, for a module this product never imports: it drives the
+    #: pipeline through Gst and GLib and draws nothing. Named by
+    #: packages/mlitdecoder-1.0-runtime.package.
+    files_python_fsvd = [
+        f'%(pydir)s/PyGObject-{version}.dist-info',
+        '%(pydir)s/gi/__init__.py',
+        '%(pydir)s/gi/_constants.py',
+        '%(pydir)s/gi/_error.py',
+        '%(pydir)s/gi/_gi%(pext)s',
+        '%(pydir)s/gi/_gtktemplate.py',
+        '%(pydir)s/gi/_option.py',
+        '%(pydir)s/gi/_ossighelper.py',
+        '%(pydir)s/gi/_propertyhelper.py',
+        '%(pydir)s/gi/_signalhelper.py',
+        '%(pydir)s/gi/docstring.py',
+        '%(pydir)s/gi/events.py',
+        '%(pydir)s/gi/importer.py',
+        '%(pydir)s/gi/module.py',
+        '%(pydir)s/gi/types.py',
+        '%(pydir)s/gi/repository/__init__.py',
+        '%(pydir)s/gi/overrides/GLib.py',
+        '%(pydir)s/gi/overrides/GObject.py',
+        '%(pydir)s/gi/overrides/Gio.py',
+        '%(pydir)s/gi/overrides/__init__.py',
+    ]
+
     files_python = [
         f'%(pydir)s/PyGObject-{version}.dist-info',
         '%(pydir)s/gi/__init__.py',
