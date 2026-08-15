@@ -1,0 +1,36 @@
+# -*- Mode: Python -*- vi:si:et:sw=4:sts=4:ts=4:syntax=python
+#
+# The tarball scripts/install.sh unpacks onto an FS-VD1000.
+#
+#     ./cerbero-uninstalled package mlitdecoder-1.0
+#
+# It holds one sub-package, mlitdecoder-1.0-runtime, which lists exactly the
+# plugins the appliance uses; see that file for why. The GPL sub-packages of
+# the stock SDK (gstreamer-1.0-codecs-gpl, -dvd-gpl, -codecs-gpl-restricted)
+# are deliberately absent rather than merely unselected: a linux tarball build
+# takes what the package lists, so leaving them out of the list is what keeps
+# them off a sold unit.
+#
+# The install prefix matches the stock SDK, so a unit can be moved between the
+# two builds by moving the /opt/gstreamer-1.0 symlink and nothing else.
+
+
+class SDKPackage(custom.GStreamer, package.SDKPackage):
+    name = 'mlitdecoder-1.0'
+    shortdesc = 'GStreamer for the FS-VD1000'
+    longdesc = 'The GStreamer runtime of the FS-VD1000 decoder and converter'
+    title = 'mlitdecoder GStreamer runtime'
+    sdk_version = '1.0'
+    uuid = 'c4b9f7e2-8a63-4d15-b0f7-6e39a2c84d51'
+    ignore_package_prefix = True
+
+    packages = [
+        # (name, required, selected)
+        ('mlitdecoder-1.0-runtime', True, True),
+    ]
+
+    install_dir = {
+        Platform.LINUX: '/opt/gstreamer-1.0/',
+    }
+
+    root_env_var = 'GSTREAMER_1_0_ROOT_%(arch)s'
