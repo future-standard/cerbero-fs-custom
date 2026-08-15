@@ -111,6 +111,19 @@ class Recipe(custom.GStreamer):
 
     files_lang = ['gst-plugins-bad-1.0']
 
+    #: futurestandard: the libraries the plugins above link, and no others.
+    #: The stock libs group carries 19, of which this product needs 4; the rest
+    #: include libgstwebrtcnice, whose own dependency libnice is not shipped, so
+    #: it sits in the prefix failing to load. Measured with ldd over every
+    #: shipped plugin. The category is named libs_fsvd so that cerbero uses its
+    #: library search function, which resolves the versioned symlinks.
+    files_libs_fsvd = [
+        'libgstcodecparsers-1.0',
+        'libgstcodecs-1.0',
+        'libgstmpegts-1.0',
+        'libgstva-1.0',
+    ]
+
     files_libs = [
         'libgstadaptivedemux-1.0',
         'libgstanalytics-1.0',
@@ -179,6 +192,23 @@ class Recipe(custom.GStreamer):
         '%(libdir)s/pkgconfig/gstreamer-vulkan-1.0.pc',
         '%(libdir)s/pkgconfig/gstreamer-webrtc-1.0.pc',
         '%(libdir)s/pkgconfig/gstreamer-webrtc-nice-1.0.pc',
+    ]
+
+    #: futurestandard: the plugins the FS-VD1000 appliance actually loads.
+    #: The stock groups are coarser than one plugin, so packaging by them
+    #: shipped 147 plugins where the product calls about thirty - including
+    #: GPL ones nothing uses, which a sold unit must not carry. This group is
+    #: named by packages/mlitdecoder-1.0-runtime.package; the manifest saying
+    #: which element each provides and why is packaging/components.json in the
+    #: mlit-decoder repository. A plugin listed here but not built is warned
+    #: about and skipped, so a disabled meson option cannot break packaging.
+    files_plugins_fsvd = [
+             '%(libdir)s/gstreamer-1.0/libgstkms%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstmpegpsdemux%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstmpegtsdemux%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstmpegtsmux%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstva%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstvideoparsersbad%(mext)s',
     ]
 
     files_plugins_analytics = [

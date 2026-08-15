@@ -33,37 +33,45 @@ class Package(custom.GStreamer, package.Package):
     uuid = '6f2c1a94-3d7e-4a51-9f0c-2b8d5e41c7a3'
     deps = ['base-system-1.0']
 
+    # Each entry is recipe:category. The categories ending in fsvd are file
+    # groups added to the recipes for this product, naming the plugins one by
+    # one: the stock groups are coarser than a plugin, and packaging by them
+    # shipped 147 plugins including GPL ones nothing calls. See the comment on
+    # files_plugins_fsvd in each recipe.
     files = [
-        # The framework: libgstreamer, the core elements (queue, identity, tee,
-        # capsfilter, fakesink), gst-inspect for diagnosing a unit on site, and
-        # the plugin scanner without which nothing registers.
-        'gstreamer-1.0',
+        # libgstreamer, the plugin scanner, gst-inspect for diagnosing a unit
+        # on site, and coreelements: queue, identity, tee, capsfilter, fakesink
+        'gstreamer-1.0:bins:libs:fsvd:misc:lang:typelibs',
 
         # videotestsrc for the standby screen, videoconvertscale as the
         # software fallback, audioconvert, audioresample and volume for the
-        # audio chain, alsa for HDMI audio out.
-        'gst-plugins-base-1.0:libs:core:sys:lang:typelibs',
+        # audio chain, typefindfunctions for the demuxers, alsa for HDMI audio
+        'gst-plugins-base-1.0:libs:fsvd:lang:typelibs',
 
-        # net       udpsrc, udpsink, rtpjitterbuffer, rtpptdemux, rtph264depay,
-        #           rtpmp2pdepay (added by a patch in this fork), rtspsrc
-        # codecs    audioparsers, mpg123, isomp4
-        # effects   deinterlace, videobox, videocrop, multifile (splitmuxsink)
-        'gst-plugins-good-1.0:net:codecs:effects:lang',
+        # udp, rtpmanager, rtp (rtpmp2pdepay is added by a patch in this fork)
+        # and rtsp; audioparsers, mpg123 and isomp4; deinterlace, videobox,
+        # videocrop and multifile for splitmuxsink
+        'gst-plugins-good-1.0:fsvd:lang',
 
-        # codecs             videoparsersbad (h264parse and friends), va
-        # codecs_restricted  tsdemux, mpegpsdemux, mpegtsmux
-        # sys                kmssink
-        # libs               libgstva and libgstcodecs, which those link
-        'gst-plugins-bad-1.0:libs:codecs:codecs_restricted:sys:lang:typelibs',
+        # videoparsersbad, va, tsdemux, mpegpsdemux, mpegtsmux and kmssink.
+        # The libs carry libgstva-1.0 and libgstcodecs, which those link.
+        'gst-plugins-bad-1.0:libs_fsvd:fsvd:lang:typelibs',
 
         # The audio decoders, and the software video fallback when VA is not
         # available. FFmpeg must be built without --enable-gpl; see the note in
-        # packaging/components.json.
+        # packaging/components.json. ffmpeg:libs is what libgstlibav.so links:
+        # without it the plugin is shipped but fails to load, and the unit is
+        # silently left with no audio decoder at all.
+        'ffmpeg:libs',
         'gst-libav-1.0:codecs_restricted',
+
+        # libmpg123, which libgstmpg123.so links. MPEG-1 Audio Layer 2 is what
+        # the IP-920D sends, so this is the audio path of the specification.
+        'mpg123:libs',
 
         # rsrtp: rtpmp2tdepay2 and rtpmp2tpay2, the TS and TTS payloaders both
         # modes are built on. MPL-2.0.
-        'gst-plugins-rs:net:libs',
+        'gst-plugins-rs:fsvd:libs',
 
         # The application is Python and drives the pipeline through gi. Without
         # the bindings and the typelibs there is nothing to run.

@@ -230,6 +230,13 @@ class Recipe(recipe.Recipe):
         if 'vvdec' in self.cargo_packages:
             self.deps.append('vvdec')
 
+        # futurestandard: the only Rust plugin the FS-VD1000 loads. rtpmp2tdepay2
+        # and rtpmp2tpay2 live here and both modes are built on them. The stock
+        # 'net' group also carries aws, hls, webrtc, quinn, ndi and more, none
+        # of which a sold appliance should be shipping and watching for CVEs.
+        # Named by packages/mlitdecoder-1.0-runtime.package.
+        self.files_plugins_fsvd = ['%(libdir)s/gstreamer-1.0/libgstrsrtp%(mext)s']
+
         self.cargo_packages = [f'gst-plugin-{pkg}' for pkg in self.cargo_packages]
         # Build with Cerbero's latest glib version as minimum version
         if 'gst-plugin-gtk4' in self.cargo_packages:

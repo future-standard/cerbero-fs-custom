@@ -57,6 +57,28 @@ class Recipe(custom.GStreamer):
 
     files_lang = ['gst-plugins-good-1.0']
 
+    #: futurestandard: the plugins the FS-VD1000 appliance actually loads.
+    #: The stock groups are coarser than one plugin, so packaging by them
+    #: shipped 147 plugins where the product calls about thirty - including
+    #: GPL ones nothing uses, which a sold unit must not carry. This group is
+    #: named by packages/mlitdecoder-1.0-runtime.package; the manifest saying
+    #: which element each provides and why is packaging/components.json in the
+    #: mlit-decoder repository. A plugin listed here but not built is warned
+    #: about and skipped, so a disabled meson option cannot break packaging.
+    files_plugins_fsvd = [
+             '%(libdir)s/gstreamer-1.0/libgstaudioparsers%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstdeinterlace%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstisomp4%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstmpg123%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstmultifile%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstrtp%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstrtpmanager%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstrtsp%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstudp%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstvideobox%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstvideocrop%(mext)s',
+    ]
+
     files_plugins_core = [
              '%(libdir)s/gstreamer-1.0/libgstautodetect%(mext)s',
              '%(libdir)s/gstreamer-1.0/libgstvideofilter%(mext)s',
