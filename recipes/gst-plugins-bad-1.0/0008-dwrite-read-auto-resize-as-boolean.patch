@@ -1,0 +1,38 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH] dwrite: read the "auto-resize" property as a boolean
+
+"auto-resize" is registered with g_param_spec_boolean() but the setter reads
+it with g_value_get_uint(). That fails the G_VALUE_HOLDS_UINT assertion and
+returns 0, so the property is silently forced to FALSE no matter what the
+application sets:
+
+    (gst-launch-1.0:64380): GLib-GObject-CRITICAL **: g_value_get_uint:
+        assertion 'G_VALUE_HOLDS_UINT (value)' failed
+
+Reproduce with any value, integer or boolean:
+
+    gst-launch-1.0 videotestsrc num-buffers=5 \
+      ! dwritetextoverlay text="a" auto-resize=true ! fakesink
+
+The getter at PROP_AUTO_RESIZE already uses g_value_set_boolean(), so reading
+the property back reports whatever priv->auto_resize holds - which is always
+the default. The result is that font-size is applied literally at the frame
+resolution instead of being scaled relative to "reference-frame-size", and the
+caller gets no indication that the request was dropped.
+
+Found while overlaying camera names on 1920x1080 sources composited onto a 4K
+video wall: the titles never scaled, and every pipeline start logged the
+assertion above.
+
+Still present in 1.28.5 and in main as of 1.29.2.1.
+--- a/_p2_/sys/dwrite/gstdwritebaseoverlay.cpp
++++ b/_p2_/sys/dwrite/gstdwritebaseoverlay.cpp
+@@ -334,7 +334,7 @@
+     }
+     case PROP_AUTO_RESIZE:
+     {
+-      gboolean auto_resize = g_value_get_uint (value);
++      gboolean auto_resize = g_value_get_boolean (value);
+       if (auto_resize != priv->auto_resize) {
+         priv->auto_resize = auto_resize;
+         priv->text_format = nullptr;

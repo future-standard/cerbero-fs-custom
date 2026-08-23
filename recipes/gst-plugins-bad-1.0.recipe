@@ -16,6 +16,7 @@ class Recipe(custom.GStreamer):
         'gst-plugins-bad-1.0/0005-h264decoder-recover-from-unpairable-field.patch',
         'gst-plugins-bad-1.0/0006-mpeg2decoder-flag-interlaced-frame-pictures.patch',
         'gst-plugins-bad-1.0/0007-vampeg2dec-report-interleaved-for-consistent-interlaced.patch',
+        'gst-plugins-bad-1.0/0008-dwrite-read-auto-resize-as-boolean.patch',
     ]
     # --- END futurestandard custom patches ---
     # License path/location is different in tarball vs. monorepo
