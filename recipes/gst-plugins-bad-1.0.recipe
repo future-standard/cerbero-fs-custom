@@ -17,6 +17,7 @@ class Recipe(custom.GStreamer):
         'gst-plugins-bad-1.0/0006-mpeg2decoder-flag-interlaced-frame-pictures.patch',
         'gst-plugins-bad-1.0/0007-vampeg2dec-report-interleaved-for-consistent-interlaced.patch',
         'gst-plugins-bad-1.0/0008-dwrite-read-auto-resize-as-boolean.patch',
+        'gst-plugins-bad-1.0/0009-mpegpsdemux-base-the-timeline-on-the-first-pts-when-there-is-no-scr.patch',
     ]
     # --- END futurestandard custom patches ---
     # License path/location is different in tarball vs. monorepo

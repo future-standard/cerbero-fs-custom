@@ -1,0 +1,70 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH] mpegpsdemux: base the timeline on the first PTS when no SCR has been seen
+
+mpegpsdemux takes the media time that maps to running time zero from the first
+SCR it parses out of a pack header:
+
+    if (G_UNLIKELY (demux->first_scr == G_MAXUINT64)) {
+        demux->first_scr = scr;
+        demux->base_time = MPEGTIME_TO_GSTTIME (demux->first_scr);
+
+and gst_ps_demux_send_segment() shifts the segment it sends by that base_time,
+so the segment start lands next to the PTS of the buffers and their running time
+comes out near zero. That is correct, and for a file it is always what happens:
+a PS file begins with a pack header.
+
+A live PS stream joined mid-flight need not. When the first PES packet arrives
+before the first pack header, base_time is still G_MAXUINT64 when the segment
+goes out, the shift is skipped, and a segment starting at zero is sent for
+buffers whose PTS is the sender's own clock. Every frame then has a running time
+of tens of thousands of seconds, and there is nothing downstream can do with
+that: a synced sink waits for a time that will not come for eleven hours, and a
+live aggregator holds the frame - and, for a hardware decoder, the surface
+behind it - while its pool allocates a fresh one for every frame that follows.
+
+Measured on an Intel N150 receiving 720x480i MPEG-2 PS over RTP (RFC 2250,
+payload type 96) from two senders, joining at an arbitrary point each time:
+
+  base_time found     segment start 39831.988 s, pts 39832.803 s -> running 0.815 s
+  base_time not found segment start     0.000 s, pts 37872.600 s -> running 37872.600 s
+
+Which of the two happens is a race with the sender's pack header interval, and
+it decided the outcome per start-up: of ten starts of the same application
+against the same two streams, the epoch leaked through on six.
+
+Downstream cannot repair it either, and the attempts are instructive.
+`identity single-segment=true` rewrites the segment start to zero and leaves the
+buffer timestamps alone, which produces exactly the same running time.
+`ignore-scr=true` does not touch the timing at all: that path updates
+first_scr/current_scr and returns before base_time is ever assigned. Correcting
+it with a pad offset in the application works until the offset has to change,
+and then the frames in flight straddle two mappings.
+
+So take the base from the first timestamped buffer when no SCR has provided one.
+The function already receives that PTS and already logs it; it just did not use
+it. A pack header arriving later sets first_scr for the SCR bookkeeping as
+before and leaves base_time alone, since it is no longer G_MAXUINT64.
+
+--- a/_p2_/gst/mpegdemux/gstmpegdemux.c
++++ b/_p2_/gst/mpegdemux/gstmpegdemux.c
+@@ -664,6 +664,20 @@
+         GST_TIME_ARGS (demux->src_segment.start),
+         GST_TIME_ARGS (demux->src_segment.stop));
+ 
++    /* Local fix: a live stream joined between two pack headers has no SCR yet,
++     * so base_time is unset and the shift below is skipped - a segment starting
++     * at zero goes out for buffers carrying the sender's own clock, and every
++     * frame then has a running time of tens of thousands of seconds. The first
++     * timestamped buffer is as good a base as the first SCR: it is the media
++     * time that is meant to play now. A pack header arriving later still sets
++     * first_scr for the SCR bookkeeping and leaves this alone. */
++    if (!GST_CLOCK_TIME_IS_VALID (demux->base_time)
++        && GST_CLOCK_TIME_IS_VALID (pts)) {
++      demux->base_time = pts;
++      GST_DEBUG_OBJECT (demux, "no SCR yet, taking base_time from the first "
++          "PTS: %" GST_TIME_FORMAT, GST_TIME_ARGS (demux->base_time));
++    }
++
+     /* we should be in sync with downstream, so start from our segment notion,
+      * which also includes proper base_time etc, tweak it a bit and send */
+     gst_segment_copy_into (&demux->src_segment, &segment);
