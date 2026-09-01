@@ -47,8 +47,8 @@ The SCR bookkeeping it sat inside is untouched: first_scr, first_scr_offset and
 the initial SCR rate are still recorded, and seeking, which reads base_time
 back through first_pts, still sees the value the segment was built from.
 
---- a/gst/mpegdemux/gstmpegdemux.c
-+++ b/gst/mpegdemux/gstmpegdemux.c
+--- a/_p2_/gst/mpegdemux/gstmpegdemux.c
++++ b/_p2_/gst/mpegdemux/gstmpegdemux.c
 @@ -1866,8 +1866,6 @@ gst_ps_demux_parse_pack_start (GstPsDemux * demux)
  
    /* keep the first src in order to calculate delta time */
