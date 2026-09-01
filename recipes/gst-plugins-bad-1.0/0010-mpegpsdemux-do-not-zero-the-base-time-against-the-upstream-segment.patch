@@ -1,0 +1,85 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH] mpegpsdemux: do not zero base_time against the upstream segment
+
+On the first pack header, base_time is set to the first SCR - the sender's own
+clock - and gst_ps_demux_send_segment() adds it to the segment it pushes, so
+that the segment and the buffer timestamps (which come straight from the PES
+clock) share one timeline. A block right after that then "adjusts" base_time
+against the upstream segment, and it has two defects:
+
+    if (demux->sink_segment.start > demux->base_time)
+      diff = demux->sink_segment.start - demux->base_time;
+    else
+      diff = demux->base_time - demux->sink_segment.start;
+    if (abs(diff) > GST_SECOND) {
+      demux->base_time -= diff;
+    }
+
+First, diff is a gint64 and abs() takes an int, so the value is truncated to
+its low 32 bits before the comparison. Whether the block runs at all therefore
+depends on bits 0-31 of a nanosecond timestamp, which is to say on nothing:
+
+    base_time 10:56:45.047 -> 39405047488888 ns -> (int) -1277451912 -> runs
+    base_time 11:50:19.473 -> 42619473455555 ns -> (int)   512977347 -> skipped
+
+Two live streams from the same sender, differing only in where their clocks
+happened to be, take opposite branches. GCC does say so with
+-Wabsolute-value, which is not in the build's warning set.
+
+Second, both arms compute a magnitude, and the result is then subtracted
+unconditionally. For any live stream - an RTP MPEG-PS feed arriving through
+rtpmp2pdepay, where upstream's segment starts at zero and the SCR is a wall
+clock - the second arm gives diff == base_time, and the subtraction sets
+base_time to exactly zero. The segment then starts at zero while every buffer
+still carries the sender's clock, tens of thousands of seconds later. Nothing
+downstream can reconcile the two: vacompositor sees frames whose running time
+is eleven hours in the future, holds them, and holds their VA surfaces with
+them until the decoder's pool has taken the whole GPU.
+
+The adjustment cannot be repaired by fixing the sign, because moving base_time
+moves only the segment. Buffer timestamps are assigned from the PES clock in
+gst_ps_demux_send_data() and are not touched, so any base_time other than the
+one the segment arithmetic already assumes leaves the two disagreeing. Keeping
+base_time at the first SCR is what the skipped branch does, and it is the
+branch that produces a consistent timeline - so the block goes.
+
+The SCR bookkeeping it sat inside is untouched: first_scr, first_scr_offset and
+the initial SCR rate are still recorded, and seeking, which reads base_time
+back through first_pts, still sees the value the segment was built from.
+
+--- a/gst/mpegdemux/gstmpegdemux.c
++++ b/gst/mpegdemux/gstmpegdemux.c
+@@ -1866,8 +1866,6 @@ gst_ps_demux_parse_pack_start (GstPsDemux * demux)
+ 
+   /* keep the first src in order to calculate delta time */
+   if (G_UNLIKELY (demux->first_scr == G_MAXUINT64)) {
+-    gint64 diff;
+-
+     demux->first_scr = scr;
+     demux->first_scr_offset = demux->cur_scr_offset;
+     demux->base_time = MPEGTIME_TO_GSTTIME (demux->first_scr);
+@@ -1876,19 +1874,11 @@ gst_ps_demux_parse_pack_start (GstPsDemux * demux)
+     /* at begin consider the new_rate as the scr rate, bytes/clock ticks */
+     scr_rate_n = new_rate;
+     scr_rate_d = CLOCK_FREQ;
+-    /* our SCR timeline might have offset wrt upstream timeline */
+-    if (demux->sink_segment.format == GST_FORMAT_TIME) {
+-      if (demux->sink_segment.start > demux->base_time)
+-        diff = demux->sink_segment.start - demux->base_time;
+-      else
+-        diff = demux->base_time - demux->sink_segment.start;
+-      if (abs(diff) > GST_SECOND) {
+-        GST_DEBUG_OBJECT (demux, "diff of %" GST_TIME_FORMAT
+-            " wrt upstream start %" GST_TIME_FORMAT "; adjusting base",
+-            GST_TIME_ARGS (diff), GST_TIME_ARGS (demux->sink_segment.start));
+-	 demux->base_time -= diff;
+-      }
+-    }
++    /* Local fix: what used to be here moved base_time to the upstream
++     * segment's start, which for a live feed is zero, while leaving the buffer
++     * timestamps on the sender's clock. See the patch header for why it cannot
++     * be corrected in place: base_time has to stay the value the segment
++     * arithmetic in gst_ps_demux_send_segment() is written against. */
+   } else if (G_LIKELY (demux->first_scr_offset != demux->cur_scr_offset)) {
+     /* estimate byte rate related to the SCR */
+     scr_rate_n = demux->cur_scr_offset - demux->first_scr_offset;
