@@ -155,6 +155,9 @@ class MSYS2Bootstrapper(BootstrapperBase):
         'gperf',
         'make',
         'diffutils',
+        # cerbero applies recipe patches with patch(1) whenever strip != 1,
+        # and MSYS2 does not ship it in the base install
+        'patch',
         # OpenSSL needs a perl version using '\' for the MSVC build
         # and a perl version using '/' for the MinGW build
         'mingw-w64-ucrt-x86_64-perl',
