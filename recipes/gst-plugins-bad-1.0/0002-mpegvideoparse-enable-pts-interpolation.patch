@@ -1,0 +1,33 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH] mpegvideoparse: interpolate the PTS of frames that have none
+
+mpegvideoparse asks GstBaseParse not to interpolate, so a frame whose PES
+packet carried no PTS reaches the decoder with GST_CLOCK_TIME_NONE rather than
+with the previous timestamp advanced by one frame duration. 0001 makes the
+same change to h264parse.
+
+**Why this tree wants it is not recorded, and this header does not invent a
+reason.** The change arrived with no description and no measurement; what is
+written above is a reading of the diff, not an account of the problem it was
+for. It is one of two patches in this directory - 0001 is the other - whose
+justification cannot be checked against anything, so treat it as load-bearing
+until somebody establishes otherwise rather than as something safe to drop.
+
+Split out on 2026-09-16. The patch file this came from also carried an
+unrelated hunk against gst/mpegdemux/gstmpegdemux.c, modifying the base_time
+adjustment that 0010 later deleted outright; 0010 had therefore been written
+against this tree's modified copy of that block rather than against upstream.
+That hunk has been removed and 0010 regenerated. The built source is unchanged
+by the split.
+
+--- a/_p2_/gst/videoparsers/gstmpegvideoparse.c
++++ b/_p2_/gst/videoparsers/gstmpegvideoparse.c
+@@ -177,7 +177,7 @@
+ {
+   parse->config_flags = FLAG_NONE;
+ 
+-  gst_base_parse_set_pts_interpolation (GST_BASE_PARSE (parse), FALSE);
++  gst_base_parse_set_pts_interpolation (GST_BASE_PARSE (parse), TRUE);
+   gst_base_parse_set_infer_ts (GST_BASE_PARSE (parse), FALSE);
+   GST_PAD_SET_ACCEPT_INTERSECT (GST_BASE_PARSE_SINK_PAD (parse));
+   GST_PAD_SET_ACCEPT_TEMPLATE (GST_BASE_PARSE_SINK_PAD (parse));

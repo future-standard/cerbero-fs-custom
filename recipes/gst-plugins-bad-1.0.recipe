@@ -10,7 +10,7 @@ class Recipe(custom.GStreamer):
     strip = 2
     patches = [
         'gst-plugins-bad-1.0/0001-h264parse-enable-pts-interpolation.patch',
-        'gst-plugins-bad-1.0/0002-mpegvideoparse-fix-timing.patch',
+        'gst-plugins-bad-1.0/0002-mpegvideoparse-enable-pts-interpolation.patch',
         'gst-plugins-bad-1.0/0003-tsdemux-add-wait-pcr-property.patch',
         'gst-plugins-bad-1.0/0004-vah264dec-report-interleaved-for-consistent-PAFF.patch',
         'gst-plugins-bad-1.0/0005-h264decoder-recover-from-unpairable-field.patch',
