@@ -1,0 +1,125 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH] d3d11deinterlace: map the D3D11 memory around VideoProcessorBlt
+
+d3d11deinterlace produces a picture that freezes on the very first frame.
+VideoProcessorBlt() keeps returning S_OK for every buffer, the element keeps
+pushing buffers at the right rate, and downstream keeps decoding them, but the
+content never changes. It happens with every deinterlacing method (blend, bob,
+adaptive and the default flagset), with any input, and is easy to reproduce
+without a camera:
+
+    gst-launch-1.0 videotestsrc pattern=ball ! video/x-raw,format=NV12 \
+        ! interlace ! d3d11upload ! d3d11deinterlace ! d3d11download \
+        ! videoconvert ! jpegenc ! multifilesink location=f_%03d.jpg
+
+Every written JPEG is byte identical, while the same pipeline without
+d3d11deinterlace produces the expected moving picture. Measured on an
+RTX 3090 (NVIDIA 581.29) with GStreamer 1.28.5, but the cause is not
+vendor specific.
+
+gst_d3d11_deinterlace_transform() takes the ID3D11VideoProcessorInputView and
+ID3D11VideoProcessorOutputView straight out of the GstD3D11Memory of the
+input and output buffer and calls VideoProcessorBlt() on them, without ever
+mapping either memory.
+
+GstD3D11Memory keeps a staging texture next to the D3D11 texture and tracks
+which of the two holds the up to date copy with the NEED_UPLOAD and
+NEED_DOWNLOAD flags. Those flags are only maintained by gst_memory_map() and
+gst_memory_unmap(): gst_d3d11_memory_map() with GST_MAP_D3D11 | GST_MAP_READ
+performs the pending staging -> texture upload, and
+gst_d3d11_memory_unmap_full() sets NEED_DOWNLOAD when the memory was mapped
+with GST_MAP_D3D11 | GST_MAP_WRITE, so that the next CPU read copies the
+texture back into the staging texture. Skipping the mapping therefore means:
+
+  - a pending CPU write on the input is never uploaded, so the video processor
+    reads a stale texture (this is what happens behind d3d11upload, which
+    writes through the staging texture), and
+
+  - the output is never flagged NEED_DOWNLOAD, so the next CPU read
+    (d3d11download, gst_video_frame_copy(), the fallback path of another
+    element, ...) keeps handing out the staging texture that was downloaded
+    for the first frame. That is the frozen picture.
+
+It also explains why the freeze is invisible to the element itself: the blit
+really does run and really does write into the output texture. Only the
+bookkeeping that tells the rest of the pipeline about it is missing. Setting
+the destination rectangle to a quarter of the frame is reflected in the very
+first output buffer and in no later one.
+
+gst_d3d11_converter_do_processor_blt() in gst-libs/gst/d3d11/gstd3d11converter.cpp
+already maps input and output around its VideoProcessorBlt() call, which is why
+the video processor path of d3d11convert works. Do the same here.
+
+The reference frames kept in the past/future queues are not mapped again: they
+were mapped for reading while they were the current input buffer, so their
+texture already holds the current copy.
+diff --git a/_p2_/sys/d3d11/gstd3d11deinterlace.cpp b/_p2_/sys/d3d11/gstd3d11deinterlace.cpp
+index 4d4c17a94e..db52a890f5 100644
+--- a/_p2_/sys/d3d11/gstd3d11deinterlace.cpp
++++ b/_p2_/sys/d3d11/gstd3d11deinterlace.cpp
+@@ -1669,6 +1669,8 @@ gst_d3d11_deinterlace_transform (GstBaseTransform * trans, GstBuffer * inbuf,
+   ID3D11VideoProcessorInputView *past_surfaces[MAX_NUM_REFERENCES] = { NULL, };
+   guint future_frames = 0;
+   guint past_frames = 0;
++  GstMemory *in_mem, *out_mem;
++  GstMapInfo in_map, out_map;
+   HRESULT hr;
+   guint i;
+ 
+@@ -1778,12 +1780,51 @@ gst_d3d11_deinterlace_transform (GstBaseTransform * trans, GstBuffer * inbuf,
+     proc_stream.ppPastSurfaces = past_surfaces;
+   }
+ 
+-  GstD3D11DeviceLockGuard lk (self->device);
+-  self->video_context->VideoProcessorSetStreamFrameFormat (self->video_proc, 0,
+-      frame_foramt);
++  /* Map the D3D11 memory around VideoProcessorBlt(), the same way
++   * gst_d3d11_converter_do_processor_blt() does.
++   *
++   * GstD3D11Memory keeps a staging texture next to the D3D11 texture and uses
++   * the NEED_UPLOAD / NEED_DOWNLOAD flags to know which of the two holds the
++   * up to date copy. Those flags are only maintained by gst_memory_map() /
++   * gst_memory_unmap(). Without the mapping here:
++   *
++   *   - a pending CPU write on the input (d3d11upload writes through the
++   *     staging texture) is never uploaded, so the processor reads a stale
++   *     texture, and
++   *   - the output is never flagged NEED_DOWNLOAD, so the next CPU read
++   *     (d3d11download, gst_video_frame_copy(), ...) keeps returning the
++   *     staging texture from the previous download.
++   *
++   * The visible result is a picture that freezes on the first frame while
++   * VideoProcessorBlt() keeps returning S_OK, i.e. deinterlacing appears to
++   * do nothing at all. */
++  in_mem = gst_buffer_peek_memory (inbuf, 0);
++  out_mem = gst_buffer_peek_memory (outbuf, 0);
++
++  if (!gst_memory_map (in_mem, &in_map,
++          (GstMapFlags) (GST_MAP_READ | GST_MAP_D3D11))) {
++    GST_ERROR_OBJECT (self, "Couldn't map input buffer");
++    return GST_FLOW_ERROR;
++  }
++
++  if (!gst_memory_map (out_mem, &out_map,
++          (GstMapFlags) (GST_MAP_WRITE | GST_MAP_D3D11))) {
++    GST_ERROR_OBJECT (self, "Couldn't map output buffer");
++    gst_memory_unmap (in_mem, &in_map);
++    return GST_FLOW_ERROR;
++  }
++
++  {
++    GstD3D11DeviceLockGuard lk (self->device);
++    self->video_context->VideoProcessorSetStreamFrameFormat (self->video_proc,
++        0, frame_foramt);
++
++    hr = self->video_context->VideoProcessorBlt (self->video_proc, pov, 0,
++        1, &proc_stream);
++  }
+ 
+-  hr = self->video_context->VideoProcessorBlt (self->video_proc, pov, 0,
+-      1, &proc_stream);
++  gst_memory_unmap (out_mem, &out_map);
++  gst_memory_unmap (in_mem, &in_map);
+ 
+   if (!gst_d3d11_result (hr, self->device)) {
+     GST_ERROR_OBJECT (self, "Failed to perform deinterlacing");
