@@ -215,6 +215,49 @@ class Recipe(custom.GStreamer):
              '%(libdir)s/gstreamer-1.0/libgstvideoparsersbad%(mext)s',
     ]
 
+    #: futurestandard: the same for the VMS appliance, and this is where the two
+    #: products diverge most. VMS decodes on Direct3D 11 with Direct3D 12 as the
+    #: second path, encodes on NVENC with Media Foundation and D3D12 behind it,
+    #: and displays through d3d11videosink - none of which exists on the
+    #: FS-VD1000, which uses VA and kmssink. mpegpsdemux and mpegtsdemux are
+    #: shared: both products receive the same MLIT payload types.
+    #:
+    #: These plugins are added to the stock sys and codecs groups by
+    #: enable_plugin() under a platform test, so on a non-Windows build they are
+    #: simply not there; cerbero warns and skips, which is what makes listing
+    #: them unconditionally safe. Named by packages/vms-1.0-runtime.package.
+    files_plugins_vms = [
+             '%(libdir)s/gstreamer-1.0/libgstd3d11%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstd3d12%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstdwrite%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstmediafoundation%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstmpegpsdemux%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstmpegtsdemux%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstnvcodec%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstopenh264%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstvideoparsersbad%(mext)s',
+    ]
+
+    #: futurestandard: the libraries the VMS plugins link. The stock libs group
+    #: carries 25, of which the closure over those nine plugins reaches 9. Among
+    #: the sixteen left out is libgstwebrtcnice-1.0, whose own dependency libnice
+    #: is not shipped either, so it would sit in the prefix failing to load.
+    #: The six Direct3D and CUDA helpers here are appended to files_libs inside
+    #: prepare() under a platform test, so they are named here rather than
+    #: inherited. Derived with scripts/pewalk.py in the video-management-system
+    #: repository.
+    files_libs_vms = [
+        'libgstcodecparsers-1.0',
+        'libgstcodecs-1.0',
+        'libgstcuda-1.0',
+        'libgstd3d11-1.0',
+        'libgstd3d12-1.0',
+        'libgstd3dshader-1.0',
+        'libgstdxva-1.0',
+        'libgstmpegts-1.0',
+        'libgstwinrt-1.0',
+    ]
+
     files_plugins_analytics = [
              '%(libdir)s/gstreamer-1.0/libgstanalyticsoverlay%(mext)s',
              '%(libdir)s/gstreamer-1.0/libgsttensordecoders%(mext)s',

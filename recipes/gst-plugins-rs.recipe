@@ -237,6 +237,20 @@ class Recipe(recipe.Recipe):
         # Named by packages/mlitdecoder-1.0-runtime.package.
         self.files_plugins_fsvd = ['%(libdir)s/gstreamer-1.0/libgstrsrtp%(mext)s']
 
+        # futurestandard: the two Rust plugins the VMS appliance loads. rsrtp is
+        # the same one the FS-VD1000 needs, for rtpmp2tdepay2. isobmff adds
+        # cmafmux, which is what the browser live view is built on: it emits
+        # fragments in small chunks, which mp4mux cannot do, and the fallback to
+        # mp4mux costs a fragment of latency. Both report MPL-2.0 at run time,
+        # which is not on this recipe's licence list; see the note on
+        # gst-plugins-rs in packaging/components.json in the
+        # video-management-system repository.
+        # Named by packages/vms-1.0-runtime.package.
+        self.files_plugins_vms = [
+            '%(libdir)s/gstreamer-1.0/libgstisobmff%(mext)s',
+            '%(libdir)s/gstreamer-1.0/libgstrsrtp%(mext)s',
+        ]
+
         self.cargo_packages = [f'gst-plugin-{pkg}' for pkg in self.cargo_packages]
         # Build with Cerbero's latest glib version as minimum version
         if 'gst-plugin-gtk4' in self.cargo_packages:

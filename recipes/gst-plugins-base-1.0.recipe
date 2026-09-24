@@ -68,6 +68,40 @@ class Recipe(custom.GStreamer):
              '%(libdir)s/gstreamer-1.0/libgstalsa%(mext)s',
     ]
 
+    #: futurestandard: the same for the VMS appliance. It shares almost nothing
+    #: with the group above: VMS carries no audio at all, composites on the GPU
+    #: through d3d11, and needs appsink, which is how every frame the server
+    #: touches leaves the pipeline. typefindfunctions provides no element and is
+    #: easy to leave out; without it decodebin and the demuxers cannot identify
+    #: a stream, and that fails when a camera is added rather than at build
+    #: time. Named by packages/vms-1.0-runtime.package.
+    files_plugins_vms = [
+             '%(libdir)s/gstreamer-1.0/libgstapp%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstplayback%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgsttypefindfunctions%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstvideoconvertscale%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstvideorate%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstvideotestsrc%(mext)s',
+    ]
+
+    #: futurestandard: the libraries those plugins link. The stock libs group
+    #: carries 12; the closure over the shipped plugins reaches 10. The two left
+    #: out are libgstallocators-1.0 and libgstfft-1.0, neither of which anything
+    #: VMS ships imports. Derived with scripts/pewalk.py in the
+    #: video-management-system repository.
+    files_libs_vms = [
+        'libgstapp-1.0',
+        'libgstaudio-1.0',
+        'libgstgl-1.0',
+        'libgstpbutils-1.0',
+        'libgstriff-1.0',
+        'libgstrtp-1.0',
+        'libgstrtsp-1.0',
+        'libgstsdp-1.0',
+        'libgsttag-1.0',
+        'libgstvideo-1.0',
+    ]
+
     files_plugins_core = [
              '%(libdir)s/gstreamer-1.0/libgstadder%(mext)s',
              '%(libdir)s/gstreamer-1.0/libgstapp%(mext)s',

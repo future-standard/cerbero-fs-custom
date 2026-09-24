@@ -79,6 +79,24 @@ class Recipe(custom.GStreamer):
              '%(libdir)s/gstreamer-1.0/libgstvideocrop%(mext)s',
     ]
 
+    #: futurestandard: the same for the VMS appliance. rtp carries the MLIT
+    #: payload types, rtpmp2pdepay among them, which exists only because of the
+    #: patch this fork applies; PT 96 has no other way in. matroska is here and
+    #: not in the group above because MPEG-2 video cannot go in MP4, so the two
+    #: recording containers are both needed. No audio plugins: VMS records and
+    #: displays video only. Named by packages/vms-1.0-runtime.package.
+    files_plugins_vms = [
+             '%(libdir)s/gstreamer-1.0/libgstdeinterlace%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstisomp4%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstjpeg%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstmatroska%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstmultifile%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstrtp%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstrtpmanager%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstrtsp%(mext)s',
+             '%(libdir)s/gstreamer-1.0/libgstudp%(mext)s',
+    ]
+
     files_plugins_core = [
              '%(libdir)s/gstreamer-1.0/libgstautodetect%(mext)s',
              '%(libdir)s/gstreamer-1.0/libgstvideofilter%(mext)s',

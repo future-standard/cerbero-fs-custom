@@ -1,0 +1,160 @@
+# vi:si:et:sw=4:sts=4:ts=4:syntax=python
+# -*- Mode: Python -*-
+#
+# What the VMS appliance actually runs, and nothing else.
+#
+# The stock gstreamer-1.0 package builds and ships 271 plugins in a 4.3 GB
+# prefix. VMS loads 28 of them, reaching 40 libraries, about 52 MB. Of the 4.3 GB
+# roughly 4.0 GB is static archives, headers and pkg-config files that an
+# appliance never opens; the rest is plugins nothing calls. Every one of those is
+# two liabilities at once:
+#
+#   - a parser or a codec exposed to whatever arrives on the multicast group,
+#     which has to be watched for CVEs and rebuilt for as long as the unit is
+#     supported
+#   - a licence obligation. The stock package carries six GPL plugins -
+#     x264, x265, a52dec, dtsdec, dvdread and resindvd - and shipping any
+#     one of them in a sold unit would place the whole work under the GPL,
+#     for elements nothing here calls. This package ships none of them.
+#
+# `cerbero package vms-1.0-runtime` builds only the recipes this package needs,
+# so the list below decides the build as well as the tarball.
+#
+# The authority for which plugins are needed and why is packaging/components.json
+# in the video-management-system repository. After a build,
+#
+#     python scripts/gen-sbom.py --verify-prefix <prefix>
+#
+# compares what came out against that manifest in both directions - plugins and
+# libraries - and names anything GPL. The file groups below are the finest
+# granularity cerbero offers, so a couple of neighbours come along inside a
+# group; that check is what reports them, and what keeps the difference
+# deliberate.
+#
+# Build it with:
+#
+#     ./cerbero-uninstalled -c config/win64.cbc package vms-1.0-runtime \
+#         --no-devel --tarball
+#
+# `--no-devel` is not optional, and `files_devel = []` below is not what
+# achieves it. cerbero adds a recipe's development files to the devel package
+# for any recipe listed here under the plain `libs` category, which is how the
+# third-party libraries at the end have to be named - they have no narrower
+# group. Without `--no-devel` you get the runtime tarball you asked for and a
+# devel tarball beside it carrying FFmpeg's headers and every static archive.
+#
+# This is a Windows product. The Direct3D, Media Foundation and NVENC plugins do
+# not exist on any other platform; cerbero warns and skips a plugin that was not
+# built, so the package does not break elsewhere, but it does not mean anything
+# there either.
+
+
+class Package(custom.GStreamer, package.Package):
+    name = 'vms-1.0-runtime'
+    shortdesc = 'GStreamer runtime for VMS'
+    longdesc = 'The GStreamer plugins and libraries the VMS video management system uses'
+    uuid = 'ce388e62-e7a6-478d-9741-037fcd9a0ad6'
+
+    # No base-system-1.0. That package carries the whole font and image
+    # rendering stack - cairo, pango, harfbuzz, freetype, fontconfig,
+    # gdk-pixbuf, librsvg, the image codecs - for plugins this product does not
+    # ship. VMS draws its one piece of text with dwritetextoverlay, which is
+    # Direct Write and needs none of it. The libraries the shipped plugins
+    # actually link are listed at the end instead, and they were found by
+    # walking the PE import tables out from each plugin, not by reading the
+    # code; see scripts/pewalk.py in the video-management-system repository.
+    deps = []
+
+    # Each entry is recipe:category. The categories ending in vms are file
+    # groups added to the recipes for this product, naming the plugins one by
+    # one: the stock groups are coarser than a plugin, and d3d11 and nvcodec sit
+    # in `sys` and `codecs` alongside dozens the product never loads. See the
+    # comment on files_plugins_vms in each recipe.
+    #
+    # libs_vms rather than libs is deliberate twice over: it is narrower, and
+    # naming the plain `libs` category is what would drag the development files
+    # in. plugins_vms rather than vms for the same reason in reverse - `vms`
+    # would match both groups and hand the library names to the wrong search
+    # function.
+    files = [
+        # libgstreamer, gst-plugin-scanner, and coreelements: queue, identity,
+        # tee, capsfilter, fakesink, filesrc, multiqueue. gst-inspect-1.0 comes
+        # with `bins` and is not a developer convenience here: server/gst.py
+        # runs it to decide which decoder and encoder this machine has, so a
+        # unit without it has no working pipeline at all. gst-launch-1.0 comes
+        # along in the same group, and gst_available() probes for it by name.
+        'gstreamer-1.0:bins:libs_vms:plugins_vms:misc:lang',
+
+        # appsink, which every frame the server sees leaves the pipeline
+        # through; decodebin for recorded files; videoconvertscale and
+        # videorate for the preview chain; videotestsrc for the standby image;
+        # typefindfunctions, without which decodebin and the demuxers cannot
+        # identify a stream.
+        'gst-plugins-base-1.0:libs_vms:plugins_vms:lang',
+
+        # The RTP depayloaders for the MLIT payload types - rtpmp2pdepay among
+        # them, which exists only because of the patch this fork carries - the
+        # jitter buffer, udpsrc, rtspsrc, both recording containers, splitmuxsink
+        # and the software deinterlacer. No libs group: nothing here exports a
+        # library.
+        'gst-plugins-good-1.0:plugins_vms:lang',
+
+        # The Direct3D 11 and 12 decode paths and d3d11videosink, NVENC and
+        # NVDEC, Media Foundation, the MPEG-2 TS and PS demuxers, the video
+        # parsers, dwritetextoverlay and openh264. The libs carry the Direct3D,
+        # DXVA, CUDA and WinRT helpers those link.
+        'gst-plugins-bad-1.0:libs_vms:plugins_vms:lang',
+
+        # avdec_h264, avdec_h265 and avdec_mpeg2video: software decode for
+        # thumbnails and for machines with no usable GPU decoder. This group
+        # holds exactly the one plugin. FFmpeg must stay built without
+        # --enable-gpl; the recipe declares LGPL-2.1-or-later, and if that ever
+        # changes the whole product becomes GPL. Worth re-reading at each
+        # version bump.
+        'gst-libav-1.0:codecs_restricted',
+
+        # rsrtp for rtpmp2tdepay2, the TS and TTS depayloader both MLIT modes
+        # are built on, and isobmff for cmafmux, which the browser live view
+        # needs to emit fragments in small chunks. Both are MPL-2.0, which is
+        # not on the gst-plugins-rs recipe's licence list; the manifest records
+        # what they report at run time instead.
+        'gst-plugins-rs:plugins_vms',
+
+        # gst-plugins-ugly is not here, and neither is anything else under the
+        # GPL. The one plugin this product ever took from it was x264, which sat
+        # fourth of five in server/gst.py:_ENCODERS: behind nvh264enc, mfh264enc
+        # and d3d12h264enc, ahead of openh264enc. No machine with an NVIDIA GPU,
+        # a Media Foundation encoder or a Direct3D 12 device ever reached it,
+        # and the machines that did are served by openh264enc, which is BSD and
+        # is in this package. It was placing the whole sold work under the GPL
+        # to cover a case that was already covered, and it was dropped on
+        # 2026-09-25.
+
+        # The libraries the plugins above link, and nothing else. Only libs: the
+        # tools that came with them - glib's gsettings, gdbus and
+        # glib-compile-schemas - are of no use on a unit and are four more
+        # binaries to account for.
+        #
+        # Two of these groups are slightly wider than the closure, because the
+        # recipes offer nothing narrower: glib:libs adds libgthread-2.0, a stub
+        # kept for source compatibility, and libjpeg-turbo:libs adds
+        # libturbojpeg, a second API nothing here calls. --verify-prefix reports
+        # both as unclaimed, which is the intended way to see them.
+        'bzip2:libs',           # linked by the libav plugin
+        'ffmpeg:libs',          # the software decoders
+        'glib:libs',            # the object system and main loop
+        'libffi:libs',          # behind GObject's closures
+        'libjpeg-turbo:libs',   # behind jpegenc: previews and thumbnails
+        'openh264:libs',        # the software encoder that is not GPL
+        'orc:libs',             # the SIMD paths of the base plugins
+        'pcre2:libs',           # the regular expressions inside glib
+        'proxy-libintl:libs',   # glib's gettext shim on Windows
+        'zlib:libs',            # glib and the muxers
+    ]
+
+    # Nothing is developed against on the unit. The headers, the .pc files and
+    # the static archives are most of what the stock 4.3 GB prefix weighs, and
+    # leaving them out is the single largest reduction available. See the note
+    # on --no-devel at the top: this list being empty is necessary and not
+    # sufficient.
+    files_devel = []

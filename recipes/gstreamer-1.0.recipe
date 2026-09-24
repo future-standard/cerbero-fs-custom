@@ -28,6 +28,25 @@ class Recipe(custom.GStreamer):
              '%(libdir)s/gstreamer-1.0/libgstcoreelements%(mext)s',
     ]
 
+    #: futurestandard: the same idea for the VMS appliance, which is a Windows
+    #: product and so needs a different set from the FS-VD1000. Named by
+    #: packages/vms-1.0-runtime.package; the manifest saying which element each
+    #: plugin provides and why is packaging/components.json in the
+    #: video-management-system repository.
+    files_plugins_vms = [
+             '%(libdir)s/gstreamer-1.0/libgstcoreelements%(mext)s',
+    ]
+
+    #: futurestandard: the libraries the VMS plugins link, and no others. The
+    #: stock libs group also carries libgstcontroller-1.0, which nothing in the
+    #: closure imports, and libgstcheck-1.0, which is the unit-test framework
+    #: and has no business on a sold appliance. Derived by walking the PE import
+    #: tables out from the shipped plugins; see scripts/pewalk.py in the
+    #: video-management-system repository. The category is named libs_vms so
+    #: that cerbero uses its library search function, which resolves the DLL
+    #: names from the import libraries.
+    files_libs_vms = ['libgstbase-1.0', 'libgstnet-1.0', 'libgstreamer-1.0']
+
     files_plugins_core = [
         '%(libdir)s/gstreamer-1.0/libgstcoreelements%(mext)s',
         '%(libdir)s/gstreamer-1.0/libgstcoretracers%(mext)s'
