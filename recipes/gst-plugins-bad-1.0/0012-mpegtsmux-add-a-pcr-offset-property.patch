@@ -1,0 +1,237 @@
+From: futurestandard local patches
+Subject: [PATCH] mpegtsmux: add a pcr-offset property
+
+The distance between the PCR written into a packet and the PTS/DTS of the
+access unit being written there was a fixed 1/8 second, a HACK by its own
+comment. It is enough while packets leave as fast as they are muxed. With a
+bitrate set the PCR is the byte clock, and an access unit larger than 1/8
+second of that bitrate finishes leaving after its own PTS: measured on an
+FS-VC1000 relaying a camera at 8 Mbps CBR with a 15-frame GOP through
+mpegtsmux bitrate=9000000, the IDR frames are 220 KB, 200 ms on that clock,
+and one PES in ten carried a PTS up to 44 ms behind the PCR of the packet
+it arrived in. No T-STD allows that.
+
+So the offset becomes a property, pcr-offset in nanoseconds, default the
+1/8 second it always was. The relay sets it to cover its largest access unit
+at its multiplex rate.
+
+diff -ru a/_p2_/gst/mpegtsmux/gstbasetsmux.c b/_p2_/gst/mpegtsmux/gstbasetsmux.c
+--- a/_p2_/gst/mpegtsmux/gstbasetsmux.c
++++ b/_p2_/gst/mpegtsmux/gstbasetsmux.c
+@@ -254,6 +254,7 @@
+   PROP_ALIGNMENT,
+   PROP_SI_INTERVAL,
+   PROP_BITRATE,
++  PROP_PCR_OFFSET,
+   PROP_PCR_INTERVAL,
+   PROP_SCTE_35_PID,
+   PROP_SCTE_35_NULL_INTERVAL,
+@@ -2932,6 +2933,15 @@
+         tsmux_set_bitrate (mux->tsmux, mux->bitrate);
+       g_mutex_unlock (&mux->lock);
+       break;
++    case PROP_PCR_OFFSET:
++      mux->pcr_offset = g_value_get_uint64 (value);
++      g_mutex_lock (&mux->lock);
++      if (mux->tsmux)
++        tsmux_set_pcr_offset (mux->tsmux,
++            gst_util_uint64_scale (mux->pcr_offset, TSMUX_CLOCK_FREQ,
++                GST_SECOND));
++      g_mutex_unlock (&mux->lock);
++      break;
+     case PROP_PCR_INTERVAL:
+       mux->pcr_interval = g_value_get_uint (value);
+       g_mutex_lock (&mux->lock);
+@@ -2979,6 +2989,9 @@
+     case PROP_BITRATE:
+       g_value_set_uint64 (value, mux->bitrate);
+       break;
++    case PROP_PCR_OFFSET:
++      g_value_set_uint64 (value, mux->pcr_offset);
++      break;
+     case PROP_PCR_INTERVAL:
+       g_value_set_uint (value, mux->pcr_interval);
+       break;
+@@ -3008,6 +3021,8 @@
+   tsmux_set_pat_interval (tsmux, mux->pat_interval);
+   tsmux_set_si_interval (tsmux, mux->si_interval);
+   tsmux_set_bitrate (tsmux, mux->bitrate);
++  tsmux_set_pcr_offset (tsmux,
++      gst_util_uint64_scale (mux->pcr_offset, TSMUX_CLOCK_FREQ, GST_SECOND));
+   tsmux_set_pcr_interval (tsmux, mux->pcr_interval);
+ 
+   return tsmux;
+@@ -3125,6 +3140,20 @@
+           0, G_MAXUINT64, TSMUX_DEFAULT_BITRATE,
+           (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+ 
++  /**
++   * GstBaseTsMux:pcr-offset:
++   *
++   * How far ahead of the PCR the PTS/DTS are placed, in nanoseconds. With a
++   * bitrate set, the PCR is the byte clock and an access unit larger than
++   * this much of that bitrate would finish leaving after its own PTS; set it
++   * to cover the largest access unit at the bitrate.
++   */
++  g_object_class_install_property (G_OBJECT_CLASS (klass), PROP_PCR_OFFSET,
++      g_param_spec_uint64 ("pcr-offset", "PCR offset (in nanoseconds)",
++          "How far ahead of the PCR the PTS/DTS are placed",
++          0, G_MAXUINT64, TSMUX_DEFAULT_PCR_OFFSET,
++          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
++
+   g_object_class_install_property (G_OBJECT_CLASS (klass), PROP_PCR_INTERVAL,
+       g_param_spec_uint ("pcr-interval", "PCR interval",
+           "Set the interval (in ticks of the 90kHz clock) for writing PCR",
+@@ -3178,6 +3207,7 @@
+   mux->prog_map = NULL;
+   mux->alignment = BASETSMUX_DEFAULT_ALIGNMENT;
+   mux->bitrate = TSMUX_DEFAULT_BITRATE;
++  mux->pcr_offset = TSMUX_DEFAULT_PCR_OFFSET;
+   mux->scte35_pid = DEFAULT_SCTE_35_PID;
+   mux->scte35_null_interval = TSMUX_DEFAULT_SCTE_35_NULL_INTERVAL;
+   mux->enable_custom_mappings = DEFAULT_ENABLE_CUSTOM_MAPPINGS;
+diff -ru a/_p2_/gst/mpegtsmux/gstbasetsmux.h b/_p2_/gst/mpegtsmux/gstbasetsmux.h
+--- a/_p2_/gst/mpegtsmux/gstbasetsmux.h
++++ b/_p2_/gst/mpegtsmux/gstbasetsmux.h
+@@ -160,6 +160,7 @@
+   gint alignment;
+   guint si_interval;
+   guint64 bitrate;
++  guint64 pcr_offset;
+   guint pcr_interval;
+   guint scte35_pid;
+   guint scte35_null_interval;
+diff -ru a/_p2_/gst/mpegtsmux/tsmux/tsmux.c b/_p2_/gst/mpegtsmux/tsmux/tsmux.c
+--- a/_p2_/gst/mpegtsmux/tsmux/tsmux.c
++++ b/_p2_/gst/mpegtsmux/tsmux/tsmux.c
+@@ -91,10 +91,9 @@
+  * at which PCR should be calculated */
+ #define PCR_BYTE_OFFSET 11
+ 
+-/* HACK: We use a fixed buffering offset for the PCR at the moment -
+- * this is the amount 'in advance' of the stream that the PCR sits.
+- * 1/8 second atm */
+-#define TSMUX_PCR_OFFSET (TSMUX_CLOCK_FREQ / 8)
++/* The default buffering offset for the PCR - the amount 'in advance' of the
++ * stream that the PCR sits, in 90 kHz ticks; see tsmux_set_pcr_offset () */
++#define TSMUX_PCR_OFFSET (TSMUX_DEFAULT_PCR_OFFSET * TSMUX_CLOCK_FREQ / GST_SECOND)
+ 
+ /* Base for all written PCR and DTS/PTS,
+  * so we have some slack to go backwards */
+@@ -163,6 +162,7 @@
+   mux->new_stream_data = NULL;
+ 
+   mux->first_pcr_ts = G_MININT64;
++  mux->pcr_offset = TSMUX_PCR_OFFSET;
+ 
+   return mux;
+ }
+@@ -1322,13 +1322,14 @@
+ }
+ 
+ static gint64
+-ts_to_pcr (gint64 ts)
++ts_to_pcr (TsMux * mux, gint64 ts)
+ {
+   if (ts == G_MININT64) {
+     return 0;
+   }
+ 
+-  return (ts - TSMUX_PCR_OFFSET) * (TSMUX_SYS_CLOCK_FREQ / TSMUX_CLOCK_FREQ);
++  return (ts - (gint64) mux->pcr_offset) * (TSMUX_SYS_CLOCK_FREQ /
++      TSMUX_CLOCK_FREQ);
+ }
+ 
+ /* Calculate the PCR to write into the current packet */
+@@ -1336,7 +1337,7 @@
+ get_current_pcr (TsMux * mux, gint64 cur_ts)
+ {
+   if (!mux->bitrate)
+-    return ts_to_pcr (cur_ts);
++    return ts_to_pcr (mux, cur_ts);
+ 
+   if (mux->first_pcr_ts == G_MININT64) {
+     g_assert (cur_ts != G_MININT64);
+@@ -1344,7 +1345,7 @@
+     GST_DEBUG ("First PCR offset is %" G_GUINT64_FORMAT, cur_ts);
+   }
+ 
+-  return ts_to_pcr (mux->first_pcr_ts) +
++  return ts_to_pcr (mux, mux->first_pcr_ts) +
+       gst_util_uint64_scale ((mux->n_bytes + PCR_BYTE_OFFSET) * 8,
+       TSMUX_SYS_CLOCK_FREQ, mux->bitrate);
+ }
+@@ -1354,7 +1355,7 @@
+ get_next_pcr (TsMux * mux, gint64 cur_ts)
+ {
+   if (!mux->bitrate)
+-    return ts_to_pcr (cur_ts);
++    return ts_to_pcr (mux, cur_ts);
+ 
+   if (mux->first_pcr_ts == G_MININT64) {
+     g_assert (cur_ts != G_MININT64);
+@@ -1362,7 +1363,7 @@
+     GST_DEBUG ("First PCR offset is %" G_GUINT64_FORMAT, cur_ts);
+   }
+ 
+-  return ts_to_pcr (mux->first_pcr_ts) +
++  return ts_to_pcr (mux, mux->first_pcr_ts) +
+       gst_util_uint64_scale ((mux->n_bytes + TSMUX_PACKET_LENGTH +
+           PCR_BYTE_OFFSET) * 8, TSMUX_SYS_CLOCK_FREQ, mux->bitrate);
+ }
+@@ -1945,3 +1946,22 @@
+   }
+   mux->bitrate = bitrate;
+ }
++
++/**
++ * tsmux_set_pcr_offset:
++ * @mux: a #TsMux
++ * @pcr_offset: how far ahead of the PCR the PTS/DTS sit, in 90 kHz ticks
++ *
++ * The distance between the PCR written into a packet and the timestamps of
++ * the access unit being written at that point. The default, 1/8 second, is
++ * enough while packets leave as fast as they are muxed. With a bitrate set the
++ * PCR is the byte clock, and an access unit larger than 1/8 second of that
++ * bitrate - an IDR frame of a low-latency GOP - finishes leaving after its
++ * own PTS, which no T-STD allows. The offset has to cover the largest access
++ * unit at the bitrate.
++ */
++void
++tsmux_set_pcr_offset (TsMux * mux, guint64 pcr_offset)
++{
++  mux->pcr_offset = pcr_offset;
++}
+diff -ru a/_p2_/gst/mpegtsmux/tsmux/tsmux.h b/_p2_/gst/mpegtsmux/tsmux/tsmux.h
+--- a/_p2_/gst/mpegtsmux/tsmux/tsmux.h
++++ b/_p2_/gst/mpegtsmux/tsmux/tsmux.h
+@@ -184,6 +184,9 @@
+   guint64 bitrate;
+   guint64 n_bytes;
+ 
++  /* How far ahead of the PCR the PTS/DTS are placed, in 90 kHz ticks */
++  guint64 pcr_offset;
++
+   /* For the per-PID continuity counter */
+   guint8 pid_packet_counts[8192];
+ 
+@@ -203,6 +206,7 @@
+ void 		tsmux_resend_pat                (TsMux *mux);
+ guint16		tsmux_get_new_pid 		(TsMux *mux);
+ void    tsmux_set_bitrate       (TsMux *mux, guint64 bitrate);
++void    tsmux_set_pcr_offset    (TsMux *mux, guint64 pcr_offset);
+ 
+ /* pid/program management */
+ TsMuxProgram *	tsmux_program_new 		(TsMux *mux, gint prog_id);
+diff -ru a/_p2_/gst/mpegtsmux/tsmux/tsmuxcommon.h b/_p2_/gst/mpegtsmux/tsmux/tsmuxcommon.h
+--- a/_p2_/gst/mpegtsmux/tsmux/tsmuxcommon.h
++++ b/_p2_/gst/mpegtsmux/tsmux/tsmuxcommon.h
+@@ -111,6 +111,8 @@
+ #define TSMUX_DEFAULT_SCTE_35_NULL_INTERVAL (TSMUX_CLOCK_FREQ * 300)
+ /* Bitrate (bits per second) */
+ #define TSMUX_DEFAULT_BITRATE      0
++/* How far ahead of the PCR the PTS/DTS sit: 1/8 s, what tsmux.c always used */
++#define TSMUX_DEFAULT_PCR_OFFSET (GST_SECOND / 8)
+ 
+ typedef struct TsMuxPacketInfo TsMuxPacketInfo;
+ typedef struct TsMuxProgram TsMuxProgram;
