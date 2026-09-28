@@ -1,0 +1,59 @@
+From: futurestandard local patches
+Subject: [PATCH] mpegtsmux: write a packet without a timestamp as payload only
+
+A buffer that carries neither PTS nor DTS can reach the muxer: h264parse
+emits one after a broken NAL, which an interrupted RTSP link produces.
+tsmux_write_stream_packet() then computed cur_ts as CLOCK_BASE plus
+G_MININT64, a huge negative number. With a bitrate set, pad_stream() saw a
+negative difference to the stream's first timestamp, gst_util_uint64_scale()
+took it as a huge unsigned divisor, the bitrate came out as zero and the
+padding loop never ended: it allocated null packets until the process was
+killed for memory, 4 GB in about seven seconds at 9 Mbps. Without a bitrate
+the same value reached the PCR.
+
+A packet whose stream has no timestamp is now written as payload only, with
+no PAT/PMT rewrite, no padding and no PCR; the next packet with a timestamp
+carries on from the byte counter, so a constant bitrate catches up over the
+gap. pad_stream() also refuses a timestamp that is not ahead of the first
+one, which covers a timeline that steps back after a resync.
+
+diff -ru a/_p2_/gst/mpegtsmux/tsmux/tsmux.c b/_p2_/gst/mpegtsmux/tsmux/tsmux.c
+--- a/_p2_/gst/mpegtsmux/tsmux/tsmux.c	2026-09-28 17:37:29.965665448 +0900
++++ b/_p2_/gst/mpegtsmux/tsmux/tsmux.c	2026-09-28 17:37:29.977783377 +0900
+@@ -1515,8 +1515,11 @@
+   if (!GST_CLOCK_STIME_IS_VALID (stream->first_ts))
+     stream->first_ts = cur_ts;
+ 
++  /* A timestamp that is not ahead of the first one has nothing to pad up
++   * to. Padding against it would compute a bitrate of zero, unsigned, and
++   * never stop. */
+   diff = GST_CLOCK_DIFF (stream->first_ts, cur_ts);
+-  if (diff == 0)
++  if (diff <= 0)
+     goto done;
+ 
+   ret = FALSE;
+@@ -1621,12 +1624,17 @@
+   g_return_val_if_fail (mux != NULL, FALSE);
+   g_return_val_if_fail (stream != NULL, FALSE);
+ 
+-  if (tsmux_stream_is_pcr (stream) || stream->program->pcr_pid) {
+-    gint64 cur_ts = CLOCK_BASE;
+-    if (tsmux_stream_get_dts (stream) != G_MININT64)
+-      cur_ts += tsmux_stream_get_dts (stream);
+-    else
+-      cur_ts += tsmux_stream_get_pts (stream);
++  gint64 cur_ts = G_MININT64;
++  if (tsmux_stream_get_dts (stream) != G_MININT64)
++    cur_ts = CLOCK_BASE + tsmux_stream_get_dts (stream);
++  else if (tsmux_stream_get_pts (stream) != G_MININT64)
++    cur_ts = CLOCK_BASE + tsmux_stream_get_pts (stream);
++
++  /* Without a timestamp the packet is payload only: there is no time to
++   * pad up to, and a PCR derived from nothing would be wrong. The next
++   * timed packet carries on from the byte counter. */
++  if (cur_ts != G_MININT64 &&
++      (tsmux_stream_is_pcr (stream) || stream->program->pcr_pid)) {
+ 
+     if (!rewrite_si (mux, cur_ts))
+       goto fail;
