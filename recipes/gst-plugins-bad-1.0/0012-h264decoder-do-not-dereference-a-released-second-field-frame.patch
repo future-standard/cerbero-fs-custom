@@ -1,0 +1,66 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH] h264decoder: do not dereference a released second-field frame
+
+gst_h264_decoder_finish_current_picture() releases the current
+GstVideoCodecFrame when the subclass' end_picture() fails, and then still
+calls gst_h264_decoder_finish_picture() for the picture (now marked
+non-existing).
+
+If that picture is the second field of a pair whose first field belongs to a
+different codec frame, finish_picture() looks both frames up again with
+gst_video_decoder_get_frame(). The second field's frame was just released, so
+the lookup returns NULL, but only first_field is checked:
+
+    if (first_field) {
+      if (GST_CLOCK_TIME_IS_VALID (first_field->pts) &&
+          GST_CLOCK_TIME_IS_VALID (second_field->pts)) {   <- NULL->pts
+
+and the process dies with an access violation reading address 0x20 (the
+offset of GstVideoCodecFrame::pts). gst_video_decoder_release_frame() at the
+end of the block would also be called with NULL.
+
+end_picture() fails for example when
+
+  a) d3d11/dxva decoders receive FLUSH_START while the streaming thread is
+     between new_picture() and end_picture(): gst_d3d11_decoder_begin_frame()
+     returns GST_FLOW_FLUSHING, which happens on every pipeline teardown that
+     flushes the decoder first, and
+  b) a field arrives without decodable slice data ("No bitstream buffer to
+     submit"), which live interlaced (PAFF) streams over RTP/UDP hit after
+     packet loss.
+
+Observed with d3d11h264dec on 1080i H.264 RTP multicast streams: the display
+process crashed in gst_h264_decoder_finish_picture() (gsth264decoder.c, the
+second_field->pts check) on the queue's streaming thread while another thread
+was sending FLUSH_START to the decoder.
+
+Skip the duration update and the release when the second field's frame is
+already gone. Upstream main has the same code.
+
+--- a/_p2_/gst-libs/gst/codecs/gsth264decoder.c
++++ b/_p2_/gst-libs/gst/codecs/gsth264decoder.c
+@@ -2284,9 +2284,12 @@
+ 
+     /* Update frame duration. since we output a frame for two input field
+      * pictures, output buffer duration should be first-field-duration +
+-     * second-field-duration */
++     * second-field-duration.
++     * second_field is NULL when its codec frame was already released, e.g.
++     * by gst_h264_decoder_finish_current_picture() after end_picture()
++     * failed (flushing, or a field without decodable slices) */
+     if (first_field) {
+-      if (GST_CLOCK_TIME_IS_VALID (first_field->pts) &&
++      if (second_field && GST_CLOCK_TIME_IS_VALID (first_field->pts) &&
+           GST_CLOCK_TIME_IS_VALID (second_field->pts)) {
+         GstClockTime first_field_end_time = first_field->pts;
+         GstClockTime frame_end_time = second_field->pts;
+@@ -2316,7 +2319,8 @@
+           GST_CODEC_PICTURE_FRAME_NUMBER (picture->other_field));
+     }
+ 
+-    gst_video_decoder_release_frame (decoder, second_field);
++    if (second_field)
++      gst_video_decoder_release_frame (decoder, second_field);
+   }
+ 
+   /* C.4.4 */
