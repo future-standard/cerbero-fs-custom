@@ -1,0 +1,176 @@
+From: gstreamer-custom-build local patches
+Subject: [PATCH] mpeg2decoder: derive the display order from the coded order
+
+GstMpeg2Decoder used temporal_reference to compute pic_order_cnt, and
+GstMpeg2Dpb uses pic_order_cnt to decide which picture to output next and
+which reference pictures a B picture predicts from.
+
+Some MPEG-2 encoders write temporal_reference values that contradict the
+coded order. Seen on a 720x480i camera stream (open GOPs, IBBP with a
+varying number of B pictures): after an I picture with temporal_reference 2
+came two B pictures numbered 9 and 10, although they precede that I picture
+in display order (their PTS is earlier too). Their pic_order_cnt came out
+higher than the I picture's, so they left the decoder after it and the video
+visibly jumped back a few frames, a couple of times per GOP cycle at fixed
+positions in the stream. avdec_mpeg2video (FFmpeg) does not use
+temporal_reference for reordering and shows the same stream correctly; every
+hardware decoder built on GstMpeg2Decoder (d3d11, d3d12, nvcodec, va) was
+affected.
+
+The display order of MPEG-2 pictures follows from the coded order and the
+picture types alone (ISO/IEC 13818-2, 6.1.1.11): a B picture is displayed as
+soon as it is decoded, an I or P picture once the next I or P picture has been
+decoded. Derive pic_order_cnt from that instead: every I/P picture advances it
+by 2 and a B picture sits between the last two I/P pictures; the second field
+of a field pair keeps the order of the first field. temporal_reference is
+still evaluated for the PTS of pictures without one and is logged next to the
+order count.
+
+The order count now wraps around after 2^31 I/P pictures (about a year of
+all-intra video at 30 fps), so GstMpeg2Dpb compares it wrap-around safe.
+
+Tested with d3d11mpeg2dec against avdec_mpeg2video on the same input: on the
+affected stream the jumps are gone and the output order matches FFmpeg frame
+by frame over a full loop of the recording; nine other MPEG-2 camera
+recordings (regular IBBP, PS from different encoders, with packet loss)
+decode in the same order as with FFmpeg.
+
+--- a/_p2_/gst-libs/gst/codecs/gstmpeg2decoder.c
++++ b/_p2_/gst-libs/gst/codecs/gstmpeg2decoder.c
+@@ -258,6 +258,9 @@
+   GstMpeg2DecoderState state;
+   PTSGenerator tsg;
+   GstClockTime current_pts;
++  /* Local fix: picture order count of the last I/P picture, see
++   * _picture_order_from_coded_order() */
++  guint32 anchor_order;
+ 
+   GstMpeg2Picture *current_picture;
+   GstVideoCodecFrame *current_frame;
+@@ -870,6 +873,36 @@
+   return GST_FLOW_OK;
+ }
+ 
++/* Local fix: the display order of MPEG-2 pictures follows from the coded order
++ * and the picture types alone (ISO/IEC 13818-2, 6.1.1.11): a B picture is
++ * displayed as soon as it is decoded, and an I or P picture when the next I or
++ * P picture has been decoded. temporal_reference only repeats this, and some
++ * encoders write values that contradict the coded order, e.g. the B pictures
++ * that follow an I picture in coded order (and so precede it in display order)
++ * numbered higher than that I picture. Used as the picture order count, such a
++ * value made those B pictures leave the decoder after the I picture, so the
++ * video jumped back a few frames, and made the DPB pick the wrong reference
++ * pictures for them. FFmpeg and hardware players do not rely on it either.
++ *
++ * Derive the picture order count from the coded order instead: every I/P
++ * picture advances it by 2, and a B picture sits between the last two I/P
++ * pictures. The second field of a field pair keeps the order of the first.
++ * The value wraps around after 2^31 I/P pictures; GstMpeg2Dpb compares it
++ * wrap-around safe. */
++static gint
++_picture_order_from_coded_order (GstMpeg2DecoderPrivate * priv,
++    const GstMpeg2Picture * picture)
++{
++  if (picture->first_field)
++    return picture->first_field->pic_order_cnt;
++
++  if (picture->type == GST_MPEG_VIDEO_PICTURE_TYPE_B)
++    return (gint) (priv->anchor_order - 1);
++
++  priv->anchor_order += 2;
++  return (gint) priv->anchor_order;
++}
++
+ static GstFlowReturn
+ gst_mpeg2_decoder_ensure_current_picture (GstMpeg2Decoder * decoder,
+     GstMpeg2Slice * slice)
+@@ -878,6 +911,7 @@
+   GstMpeg2DecoderClass *klass = GST_MPEG2_DECODER_GET_CLASS (decoder);
+   GstMpeg2Picture *picture = NULL;
+   GstFlowReturn ret = GST_FLOW_OK;
++  gint tsn_order;
+ 
+   if (priv->current_picture) {
+     g_assert (_is_valid_state (decoder, GST_MPEG2_DECODER_STATE_GOT_SLICE));
+@@ -962,17 +996,18 @@
+   picture->tsn = priv->pic_hdr.tsn;
+   priv->current_pts =
+       _pts_eval (&priv->tsg, priv->current_frame->pts, picture->tsn);
+-  picture->pic_order_cnt = _pts_get_poc (&priv->tsg);
++  tsn_order = _pts_get_poc (&priv->tsg);
++  picture->pic_order_cnt = _picture_order_from_coded_order (priv, picture);
+ 
+   priv->current_picture = picture;
+   GST_LOG_OBJECT (decoder,
+-      "Create new picture %p(%s), system number: %d, poc: %d,"
+-      " type: 0x%d, first field %p",
++      "Create new picture %p(%s), system number: %d, poc: %d"
++      " (temporal_reference order %d), type: 0x%d, first field %p",
+       picture,
+       (picture->structure == GST_MPEG_VIDEO_PICTURE_STRUCTURE_FRAME) ?
+       "frame" : "field",
+       GST_CODEC_PICTURE_FRAME_NUMBER (picture),
+-      picture->pic_order_cnt, picture->type, picture->first_field);
++      picture->pic_order_cnt, tsn_order, picture->type, picture->first_field);
+ 
+   return gst_mpeg2_decoder_start_current_picture (decoder, slice);
+ }
+--- a/_p2_/gst-libs/gst/codecs/gstmpeg2picture.c
++++ b/_p2_/gst-libs/gst/codecs/gstmpeg2picture.c
+@@ -140,16 +140,24 @@
+   dpb->num_ref_pictures = 0;
+ }
+ 
++/* Local fix: GstMpeg2Decoder derives pic_order_cnt from the coded order and
++ * lets it wrap around (see _picture_order_from_coded_order() there), so
++ * compare it wrap-around safe. Live pictures are at most a few apart. */
++static inline gboolean
++_poc_after (const GstMpeg2Picture * a, const GstMpeg2Picture * b)
++{
++  return (gint32) ((guint32) a->pic_order_cnt - (guint32) b->pic_order_cnt) > 0;
++}
++
+ static void
+ _dpb_add_to_reference (GstMpeg2Dpb * dpb, GstMpeg2Picture * pic)
+ {
+   gint index = -1;
+ 
+   if (G_LIKELY (dpb->num_ref_pictures == 2)) {
+-    index = (dpb->ref_pic_list[0]->pic_order_cnt >
+-        dpb->ref_pic_list[1]->pic_order_cnt);
++    index = _poc_after (dpb->ref_pic_list[0], dpb->ref_pic_list[1]);
+ 
+-    if (dpb->ref_pic_list[index]->pic_order_cnt > pic->pic_order_cnt)
++    if (_poc_after (dpb->ref_pic_list[index], pic))
+       return;
+   }
+ 
+@@ -231,13 +239,13 @@
+       continue;
+ 
+     if (dpb->ref_pic_list[i]->needed_for_output) {
+-      if (!pic || pic->pic_order_cnt > dpb->ref_pic_list[i]->pic_order_cnt)
++      if (!pic || _poc_after (pic, dpb->ref_pic_list[i]))
+         gst_mpeg2_picture_replace (&pic, dpb->ref_pic_list[i]);
+     }
+   }
+ 
+   if (dpb->new_pic && dpb->new_pic->needed_for_output &&
+-      (!pic || pic->pic_order_cnt > dpb->new_pic->pic_order_cnt))
++      (!pic || _poc_after (pic, dpb->new_pic)))
+     gst_mpeg2_picture_replace (&pic, dpb->new_pic);
+ 
+   /* Then, replace the reference if needed. */
+@@ -288,10 +296,10 @@
+     if (!ref_picture)
+       continue;
+ 
+-    index = ref_picture->pic_order_cnt > picture->pic_order_cnt;
++    index = _poc_after (ref_picture, picture);
+     picture_ptr = &ref_pictures[index];
+     if (!*picture_ptr ||
+-        ((*picture_ptr)->pic_order_cnt > ref_picture->pic_order_cnt) == index)
++        _poc_after (*picture_ptr, ref_picture) == index)
+       *picture_ptr = ref_picture;
+   }
+ 
