@@ -1,8 +1,7 @@
 diff --git a/gst/multifile/gstmultifilesink.c b/gst/multifile/gstmultifilesink.c
-index acee9b81b8..3cd01bf1c3 100644
 --- a/_p2_/gst/multifile/gstmultifilesink.c
 +++ b/_p2_/gst/multifile/gstmultifilesink.c
-@@ -88,6 +88,8 @@ GST_DEBUG_CATEGORY_STATIC (gst_multi_file_sink_debug);
+@@ -89,6 +89,8 @@ GST_DEBUG_CATEGORY_STATIC (gst_multi_fil
  #define DEFAULT_MAX_FILE_DURATION GST_CLOCK_TIME_NONE
  #define DEFAULT_AGGREGATE_GOPS FALSE
  #define DEFAULT_MIN_KEYFRAME_DISTANCE (10 * GST_SECOND)
@@ -11,7 +10,7 @@ index acee9b81b8..3cd01bf1c3 100644
  
  enum
  {
-@@ -100,7 +102,8 @@ enum
+@@ -101,7 +103,8 @@ enum
    PROP_MAX_FILE_SIZE,
    PROP_MAX_FILE_DURATION,
    PROP_AGGREGATE_GOPS,
@@ -21,7 +20,7 @@ index acee9b81b8..3cd01bf1c3 100644
  };
  
  static void gst_multi_file_sink_finalize (GObject * object);
-@@ -273,6 +276,14 @@ gst_multi_file_sink_class_init (GstMultiFileSinkClass * klass)
+@@ -274,6 +277,14 @@ gst_multi_file_sink_class_init (GstMulti
            "Minimum distance between keyframes to start a new file", 0,
            G_MAXUINT64, DEFAULT_MIN_KEYFRAME_DISTANCE,
            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
@@ -36,7 +35,7 @@ index acee9b81b8..3cd01bf1c3 100644
  
    gobject_class->finalize = gst_multi_file_sink_finalize;
  
-@@ -315,6 +326,9 @@ gst_multi_file_sink_init (GstMultiFileSink * multifilesink)
+@@ -316,6 +327,9 @@ gst_multi_file_sink_init (GstMultiFileSi
  
    multifilesink->next_segment = GST_CLOCK_TIME_NONE;
    multifilesink->force_key_unit_count = -1;
@@ -46,7 +45,15 @@ index acee9b81b8..3cd01bf1c3 100644
  }
  
  static void
-@@ -372,6 +386,9 @@ gst_multi_file_sink_set_property (GObject * object, guint prop_id,
+@@ -324,6 +338,7 @@ gst_multi_file_sink_finalize (GObject *
+   GstMultiFileSink *sink = GST_MULTI_FILE_SINK (object);
+ 
+   g_free (sink->filename);
++  g_free (sink->current_datetime);
+ 
+   G_OBJECT_CLASS (parent_class)->finalize (object);
+ }
+@@ -373,6 +388,9 @@ gst_multi_file_sink_set_property (GObjec
      case PROP_MIN_KEYFRAME_DISTANCE:
        sink->min_keyframe_distance = g_value_get_uint64 (value);
        break;
@@ -56,7 +63,7 @@ index acee9b81b8..3cd01bf1c3 100644
      default:
        G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
        break;
-@@ -412,6 +429,9 @@ gst_multi_file_sink_get_property (GObject * object, guint prop_id,
+@@ -413,6 +431,9 @@ gst_multi_file_sink_get_property (GObjec
      case PROP_MIN_KEYFRAME_DISTANCE:
        g_value_set_uint64 (value, sink->min_keyframe_distance);
        break;
@@ -66,7 +73,7 @@ index acee9b81b8..3cd01bf1c3 100644
      default:
        G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
        break;
-@@ -1063,6 +1083,27 @@ stdio_write_error:
+@@ -1088,6 +1109,27 @@ stdio_write_error:
    }
  }
  
@@ -94,7 +101,7 @@ index acee9b81b8..3cd01bf1c3 100644
  static gboolean
  gst_multi_file_sink_open_next_file (GstMultiFileSink * multifilesink)
  {
-@@ -1072,7 +1113,15 @@ gst_multi_file_sink_open_next_file (GstMultiFileSink * multifilesink)
+@@ -1097,7 +1139,16 @@ gst_multi_file_sink_open_next_file (GstM
  
    gst_multi_file_sink_ensure_max_files (multifilesink);
  
@@ -102,6 +109,7 @@ index acee9b81b8..3cd01bf1c3 100644
 +  GST_INFO_OBJECT (multifilesink, "File name time is %d", multifilesink->filename_time);
 +
 +  if (multifilesink->filename_time){
++    g_free (multifilesink->current_datetime);
 +    multifilesink->current_datetime = get_formatted_datetime();
 +    filename = g_strdup_printf (multifilesink->filename, multifilesink->current_datetime);
 +  }
@@ -111,7 +119,7 @@ index acee9b81b8..3cd01bf1c3 100644
    multifilesink->file = g_fopen (filename, "wb");
    if (multifilesink->file == NULL) {
      g_free (filename);
-@@ -1097,7 +1146,10 @@ gst_multi_file_sink_close_file (GstMultiFileSink * multifilesink,
+@@ -1122,7 +1173,10 @@ gst_multi_file_sink_close_file (GstMulti
    multifilesink->file = NULL;
  
    if (buffer) {
@@ -124,7 +132,6 @@ index acee9b81b8..3cd01bf1c3 100644
      g_free (filename);
    }
 diff --git a/gst/multifile/gstmultifilesink.h b/gst/multifile/gstmultifilesink.h
-index bd7eb2a83e..263fc859f0 100644
 --- a/_p2_/gst/multifile/gstmultifilesink.h
 +++ b/_p2_/gst/multifile/gstmultifilesink.h
 @@ -80,6 +80,8 @@ struct _GstMultiFileSink
@@ -136,4 +143,3 @@ index bd7eb2a83e..263fc859f0 100644
    gchar *filename;
    gint index;
    gboolean post_messages;
-
